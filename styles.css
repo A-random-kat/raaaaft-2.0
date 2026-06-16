@@ -102,7 +102,7 @@ h1 {
 
 .bars {
   display: grid;
-  grid-template-columns: repeat(5, minmax(76px, 1fr));
+  grid-template-columns: repeat(6, minmax(70px, 1fr));
   gap: 8px;
 }
 
@@ -152,6 +152,10 @@ h1 {
   background: linear-gradient(90deg, #2ca76e, var(--leaf));
 }
 
+.breath b {
+  background: linear-gradient(90deg, #47d1d7, #d7fbff);
+}
+
 .xp b {
   background: linear-gradient(90deg, #7e64ff, #f07fff);
 }
@@ -187,7 +191,6 @@ h1 {
 .scoreboard,
 #scoreboard,
 .stats,
-.crafting,
 .leveling {
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -267,12 +270,10 @@ h1 {
   font-size: 18px;
 }
 
-.crafting,
 .leveling {
   padding: 10px;
 }
 
-.crafting h2,
 .leveling h2 {
   margin-bottom: 8px;
   color: #dff5fb;
@@ -281,28 +282,6 @@ h1 {
   text-transform: uppercase;
 }
 
-.crafting-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 8px;
-}
-
-.crafting-head h2 {
-  margin-bottom: 0;
-}
-
-.crafting-head button {
-  width: auto;
-  min-height: 28px;
-  margin-top: 0;
-  padding: 5px 8px;
-  font-size: 11px;
-  text-align: center;
-}
-
-.crafting button,
 .leveling button {
   width: 100%;
   min-height: 35px;
@@ -318,15 +297,6 @@ h1 {
   cursor: pointer;
 }
 
-.crafting button small {
-  display: block;
-  margin-top: 1px;
-  color: var(--muted);
-  font-size: 10px;
-  font-weight: 650;
-}
-
-.crafting button:hover,
 .leveling button:hover {
   border-color: rgba(54, 214, 199, 0.65);
   background: rgba(54, 214, 199, 0.16);
@@ -379,11 +349,25 @@ h1 {
   left: 4px;
   overflow: hidden;
   color: #d8eef4;
-  font-size: 9px;
+  font-size: 8px;
   font-weight: 800;
   text-align: center;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.slot .count {
+  position: absolute;
+  top: 4px;
+  right: 5px;
+  min-width: 15px;
+  padding: 1px 4px;
+  border-radius: 8px;
+  background: rgba(54, 214, 199, 0.2);
+  color: #e8fbff;
+  font-size: 9px;
+  font-weight: 900;
+  text-align: center;
 }
 
 #toast,
@@ -449,7 +433,6 @@ h1 {
   color: #e8fbff;
 }
 
-#inventory,
 #recipe-book {
   position: absolute;
   left: 50%;
@@ -465,12 +448,18 @@ h1 {
   backdrop-filter: blur(12px);
 }
 
-#inventory[hidden],
+#recipe-book {
+  left: 16px;
+  top: 50%;
+  width: min(430px, calc(100vw - 236px));
+  transform: translateY(-50%);
+}
+
 #recipe-book[hidden] {
   display: none;
 }
 
-.inventory-head {
+.popup-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -478,11 +467,11 @@ h1 {
   margin-bottom: 12px;
 }
 
-.inventory-head h2 {
+.popup-head h2 {
   font-size: 16px;
 }
 
-.inventory-head button {
+.popup-head button {
   padding: 7px 10px;
   border: 1px solid rgba(214, 244, 249, 0.2);
   border-radius: 6px;
@@ -490,29 +479,6 @@ h1 {
   color: var(--ink);
   font-weight: 850;
   cursor: pointer;
-}
-
-#inventory-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
-  gap: 8px;
-  overflow: auto;
-}
-
-.inventory-item {
-  min-height: 48px;
-  padding: 9px 10px;
-  border: 1px solid rgba(214, 244, 249, 0.16);
-  border-radius: 7px;
-  background: rgba(255, 255, 255, 0.06);
-  color: var(--ink);
-  text-align: left;
-  cursor: pointer;
-}
-
-.inventory-item:hover {
-  border-color: rgba(54, 214, 199, 0.65);
-  background: rgba(54, 214, 199, 0.14);
 }
 
 .recipe-card {
@@ -546,22 +512,6 @@ h1 {
   font-size: 11px;
   font-weight: 750;
   line-height: 1.35;
-}
-
-.inventory-item b,
-.inventory-item span {
-  display: block;
-}
-
-.inventory-item b {
-  font-size: 12px;
-}
-
-.inventory-item span {
-  margin-top: 3px;
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 800;
 }
 
 #start-screen,
@@ -662,7 +612,6 @@ h1 {
   }
 
   .brand p,
-  .crafting button small,
   #help {
     display: none;
   }
@@ -678,7 +627,6 @@ h1 {
     width: 154px;
   }
 
-  .crafting,
   .leveling {
     display: none;
   }

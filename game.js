@@ -8,9 +8,6 @@
   const hotbarEl = document.getElementById("hotbar");
   const toastEl = document.getElementById("toast");
   const promptEl = document.getElementById("prompt");
-  const inventoryEl = document.getElementById("inventory");
-  const inventoryGridEl = document.getElementById("inventory-grid");
-  const inventoryCloseEl = document.getElementById("inventory-close");
   const recipeBookEl = document.getElementById("recipe-book");
   const recipeGridEl = document.getElementById("recipe-grid");
   const recipeBookOpenEl = document.getElementById("recipe-book-open");
@@ -24,11 +21,16 @@
 
   const TAU = Math.PI * 2;
   const TILE = 72;
-  const WORLD = 5200;
+  const WORLD = 7200;
   const STRUCTURE_RADIUS = 21;
   const GRILL_TIME = 60;
   const WATER_TIME = 60;
   const TOMATO_GROW_TIME = 300;
+  const DROWN_TIME = 20;
+  const SHARK_HP = 120;
+  const SHARK_BITE_DAMAGE = 36;
+  const SHARK_RAFT_DAMAGE = 30;
+  const CROCODILE_DAMAGE = 27;
   const rnd = (a, b) => a + Math.random() * (b - a);
   const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
   const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
@@ -49,14 +51,14 @@
   };
 
   const blockHp = {
-    deck: 80,
-    grill: 95,
-    waterMaker: 110,
-    plantPot: 60,
-    chest: 120,
-    wall: 170,
-    torch: 45,
-    cannon: 150
+    deck: 120,
+    grill: 143,
+    waterMaker: 165,
+    plantPot: 90,
+    chest: 180,
+    wall: 255,
+    torch: 68,
+    cannon: 225
   };
 
   const blockFootprints = {
@@ -68,22 +70,6 @@
     torch: { w: 14, h: 32 },
     cannon: { w: 48, h: 34 }
   };
-
-  const inventoryOrder = [
-    "wood",
-    "leaves",
-    "scrap",
-    "cloth",
-    "rope",
-    "glass",
-    "rawFish",
-    "cookedFish",
-    "sharkMeat",
-    "meat",
-    "coconut",
-    "tomato",
-    "bandage"
-  ];
 
   const hotbar = [
     { id: "rod", name: "Rod", key: "1" },
@@ -119,6 +105,7 @@
   let serverPlayerId = null;
   let serverSyncTimer = 0;
   let scoreboardRows = [];
+  let remotePlayers = [];
   let activeCannon = null;
 
   const state = createWorld();
@@ -133,6 +120,7 @@
       hunger: 88,
       thirst: 86,
       stamina: 100,
+      swimTime: 0,
       xp: 0,
       totalXp: 0,
       level: 1,
@@ -158,6 +146,7 @@
       debris: [],
       islands: [],
       animals: [],
+      animalRespawns: [],
       projectiles: [],
       particles: [],
       resources: {
@@ -171,6 +160,7 @@
         cookedFish: 0,
         sharkMeat: 0,
         meat: 0,
+        cookedMeat: 0,
         coconut: 0,
         tomato: 0,
         bandage: 1
@@ -178,26 +168,39 @@
       camera: { x: player.x, y: player.y },
       raftOffset: { x: player.x - TILE * 0.5, y: player.y - TILE * 0.5 },
       sharks: createSharks(player),
+      crocTimer: rnd(18, 35),
       messages: [],
       day: 1
     };
   }
 
-  function createSharks(player) {
-    return Array.from({ length: 14 }, (_, i) => {
-      const a = (i / 14) * TAU + rnd(-0.25, 0.25);
-      const range = rnd(430, 980);
+  function createSharks(player, islands = null) {
+    return Array.from({ length: 14 }, () => {
+      const p = randomOceanPoint(520, player, islands);
+      const a = rnd(0, TAU);
+      const aggressive = Math.random() < 0.25;
       return {
-        x: player.x + Math.cos(a) * range,
-        y: player.y + Math.sin(a) * range,
-        hp: 90,
+        x: p.x,
+        y: p.y,
+        hp: SHARK_HP,
         bite: 0,
         flee: 0,
-        aggro: Math.random() < 0.01 ? rnd(18, 35) : 0,
-        wander: a + Math.PI / 2,
+        aggressive,
+        aggro: aggressive ? 99 : 0,
+        wander: a,
         finBob: rnd(0, TAU)
       };
     });
+  }
+
+  function randomOceanPoint(minFrom = 0, from = null, islands = null) {
+    for (let i = 0; i < 80; i++) {
+      const p = { x: rnd(180, WORLD - 180), y: rnd(180, WORLD - 180) };
+      if (from && dist(p, from) < minFrom) continue;
+      if (islands?.some((island) => Math.hypot(p.x - island.x, p.y - island.y) < island.r + 95)) continue;
+      return p;
+    }
+    return { x: 520, y: 520 };
   }
 
   function tile(gx, gy, type) {
@@ -206,33 +209,59 @@
   }
 
   function seedWorld() {
-    for (let i = 0; i < 115; i++) spawnDebris();
+    for (let i = 0; i < 175; i++) spawnDebris();
     const specs = [
-      { x: 1720, y: 1780, r: 190, kind: "small" },
-      { x: 3650, y: 1520, r: 260, kind: "medium" },
-      { x: 1660, y: 3650, r: 285, kind: "medium" },
-      { x: 3860, y: 3840, r: 360, kind: "large" }
+      { x: 980, y: 980, r: 215, kind: "small" },
+      { x: 2220, y: 860, r: 260, kind: "medium", wreck: true },
+      { x: 4020, y: 930, r: 285, kind: "medium" },
+      { x: 5900, y: 850, r: 330, kind: "large", wreck: true },
+      { x: 1160, y: 2360, r: 300, kind: "medium" },
+      { x: 2860, y: 2460, r: 430, kind: "large", wreck: true },
+      { x: 4460, y: 2500, r: 245, kind: "small" },
+      { x: 6200, y: 2720, r: 275, kind: "medium" },
+      { x: 1020, y: 4150, r: 260, kind: "medium" },
+      { x: 2660, y: 4320, r: 225, kind: "small" },
+      { x: 4240, y: 4160, r: 380, kind: "large", wreck: true },
+      { x: 5830, y: 4480, r: 230, kind: "small" },
+      { x: 1260, y: 6160, r: 315, kind: "medium", wreck: true },
+      { x: 3320, y: 6120, r: 260, kind: "medium" },
+      { x: 5480, y: 6260, r: 390, kind: "large" }
     ];
     specs.forEach(addIsland);
   }
 
+  function setSafeSpawn() {
+    const p = { x: WORLD / 2, y: 560 };
+    const spawn = state.islands.some((island) => Math.hypot(p.x - island.x, p.y - island.y) < island.r + 260)
+      ? randomOceanPoint(0, null, state.islands)
+      : p;
+    state.player.x = spawn.x;
+    state.player.y = spawn.y;
+    state.camera.x = spawn.x;
+    state.camera.y = spawn.y;
+    state.raftOffset.x = spawn.x - TILE * 0.5;
+    state.raftOffset.y = spawn.y - TILE * 0.5;
+    state.sharks = createSharks(state.player, state.islands);
+  }
+
   function addIsland(spec) {
-    const island = { ...spec, trees: [], bushes: [], loot: [] };
-    const treeCount = spec.kind === "large" ? 18 : spec.kind === "medium" ? 12 : 7;
+    const island = { ...spec, trees: [], bushes: [], loot: [], shipwreck: null };
+    const treeCount = spec.kind === "large" ? 26 : spec.kind === "medium" ? 17 : 10;
     for (let i = 0; i < treeCount; i++) {
       const p = pointOnIsland(island, 0.78);
-      island.trees.push({ ...p, hp: 40, coconut: true });
+      island.trees.push({ ...p, hp: 40, maxHp: 40, coconut: true, respawn: 0 });
     }
     for (let i = 0; i < treeCount + 4; i++) {
       island.bushes.push(pointOnIsland(island, 0.9));
     }
-    for (let i = 0; i < 8; i++) {
-      island.loot.push({ ...pointOnIsland(island, 0.86), type: Math.random() < 0.55 ? "tomato" : "cloth" });
+    for (let i = 0; i < 10; i++) {
+      island.loot.push({ ...pointOnIsland(island, 0.86), type: Math.random() < 0.55 ? "tomato" : "cloth", respawn: 0 });
     }
+    if (spec.wreck) addShipwreck(island);
     state.islands.push(island);
 
     const crabCount = spec.kind === "small" ? 3 : 5;
-    for (let i = 0; i < crabCount; i++) state.animals.push(animal("crab", pointOnIsland(island, 0.85)));
+    for (let i = 0; i < crabCount; i++) state.animals.push(animal("crab", pointOnIsland(island, 0.85), island));
   }
 
   function pointOnIsland(island, scale) {
@@ -241,13 +270,32 @@
     return { x: island.x + Math.cos(a) * r, y: island.y + Math.sin(a) * r };
   }
 
-  function animal(type, p) {
+  function addShipwreck(island) {
+    const angle = rnd(0, TAU);
+    const p = {
+      x: island.x + Math.cos(angle) * island.r * 0.9,
+      y: island.y + Math.sin(angle) * island.r * 0.9
+    };
+    island.shipwreck = { ...p, angle, loot: [] };
+    for (let i = 0; i < 7; i++) {
+      island.shipwreck.loot.push({
+        x: p.x + Math.cos(angle + Math.PI / 2) * rnd(-45, 45) + Math.cos(angle) * rnd(-60, 35),
+        y: p.y + Math.sin(angle + Math.PI / 2) * rnd(-45, 45) + Math.sin(angle) * rnd(-60, 35),
+        type: Math.random() < 0.55 ? "scrap" : Math.random() < 0.78 ? "glass" : "rope",
+        qty: 1,
+        dead: false
+      });
+    }
+  }
+
+  function animal(type, p, homeIsland = null) {
     const stats = {
       crab: { hp: 28, speed: 28, dmg: 4, xp: 7 },
       pig: { hp: 70, speed: 54, dmg: 12, xp: 20 },
-      elephant: { hp: 180, speed: 42, dmg: 25, xp: 55 }
+      elephant: { hp: 180, speed: 42, dmg: 25, xp: 55 },
+      crocodile: { hp: SHARK_HP, speed: 36, dmg: CROCODILE_DAMAGE, xp: 38 }
     }[type];
-    return { type, ...p, hp: stats.hp, maxHp: stats.hp, speed: stats.speed, dmg: stats.dmg, xp: stats.xp, hit: 0, wander: rnd(0, TAU), cd: 0 };
+    return { type, ...p, homeIsland, hp: stats.hp, maxHp: stats.hp, speed: stats.speed, dmg: stats.dmg, xp: stats.xp, hit: 0, wander: rnd(0, TAU), cd: 0 };
   }
 
   function spawnDebris() {
@@ -259,15 +307,17 @@
       vx: rnd(-8, 8),
       vy: rnd(10, 26),
       type,
-      bob: rnd(0, TAU)
+      bob: rnd(0, TAU),
+      life: 180
     });
   }
 
   seedWorld();
+  setSafeSpawn();
   renderHotbar();
   renderRecipes();
   renderRecipeBook();
-  updateHud();
+    updateHud();
   usernameEl.focus();
 
   function resize() {
@@ -305,7 +355,7 @@
     if (e.code === "KeyG") cycleFoodChoice();
     if (e.code === "KeyZ") train("speed");
     if (e.code === "KeyX") train("agility");
-    if (e.code === "KeyI") toggleInventory();
+    if (e.code === "KeyV") train("strength");
     if (e.code === "KeyC") toggleRecipeBook();
     if (e.code === "KeyF") interact();
     if (e.code === "Enter" && !gameStarted && !startScreenEl.hidden) startGame();
@@ -326,19 +376,12 @@
     mouse.down = false;
   });
 
-  document.querySelectorAll("[data-craft]").forEach((btn) => {
-    btn.addEventListener("click", () => craft(btn.dataset.craft));
-  });
-
   document.querySelectorAll("[data-stat]").forEach((btn) => {
     btn.addEventListener("click", () => train(btn.dataset.stat));
   });
 
   startButtonEl.addEventListener("click", startGame);
-  inventoryCloseEl.addEventListener("click", () => {
-    inventoryEl.hidden = true;
-  });
-  recipeBookOpenEl.addEventListener("click", toggleRecipeBook);
+  if (recipeBookOpenEl) recipeBookOpenEl.addEventListener("click", toggleRecipeBook);
   recipeBookCloseEl.addEventListener("click", () => {
     recipeBookEl.hidden = true;
   });
@@ -356,6 +399,7 @@
     state.islands = [];
     state.animals = [];
     seedWorld();
+    setSafeSpawn();
     dayClock = 0;
     cast = null;
     rowingTimer = 0;
@@ -408,10 +452,11 @@
         build: "BLD",
         empty: ""
       }[item.id];
-      slot.innerHTML = `<kbd>${item.key}</kbd><div class="icon">${icon}</div><div class="name">${hotbarName(item)}</div>`;
+      const count = hotbarCount(item);
+      slot.innerHTML = `<kbd>${item.key}</kbd>${count ? `<span class="count">${count}</span>` : ""}<div class="icon">${icon}</div><div class="name">${hotbarName(item)}</div>`;
       slot.addEventListener("click", () => {
         selected = i;
-        buildMode = item.id === "build";
+        buildMode = false;
         heldItem = item.id;
         renderHotbar();
       });
@@ -427,12 +472,26 @@
     return item.name;
   }
 
+  function hotbarCount(item) {
+    if (item.id === "bandage") return state.resources.bandage || "";
+    if (item.id === "glass") return state.resources.glass || "";
+    if (item.id === "food") {
+      const food = selectedFood || availableFoods()[0];
+      return food ? state.resources[food] || "" : "";
+    }
+    if (item.id === "build") return pendingBuild[buildChoice] || "";
+    return "";
+  }
+
+  function hotbarResource(id) {
+    return ["bandage", "glass"].includes(id);
+  }
+
   function bestFoodLabel() {
     const r = state.resources;
     if (selectedFood && r[selectedFood] > 0) return `${label(selectedFood)} ${r[selectedFood]}`;
     if (r.cookedFish > 0) return `Cooked Fish ${r.cookedFish}`;
-    if (r.sharkMeat > 0) return `Shark Meat ${r.sharkMeat}`;
-    if (r.meat > 0) return `Meat ${r.meat}`;
+    if (r.cookedMeat > 0) return `Cooked Meat ${r.cookedMeat}`;
     if (r.rawFish > 0) return `Raw Fish ${r.rawFish}`;
     if (r.coconut > 0) return `Coconut ${r.coconut}`;
     if (r.tomato > 0) return `Tomato ${r.tomato}`;
@@ -440,17 +499,10 @@
   }
 
   function availableFoods() {
-    return ["cookedFish", "sharkMeat", "meat", "rawFish", "tomato", "coconut"].filter((key) => (state.resources[key] || 0) > 0);
+    return ["cookedFish", "cookedMeat", "rawFish", "tomato", "coconut"].filter((key) => (state.resources[key] || 0) > 0);
   }
 
   function renderRecipes() {
-    document.querySelectorAll("[data-craft]").forEach((btn) => {
-      const name = btn.dataset.craft;
-      const small = btn.querySelector("small");
-      const recipe = recipes[name];
-      if (!small || !recipe) return;
-      small.textContent = `${recipeText(name)}${pendingBuild[name] ? ` · ready ${pendingBuild[name]}` : ""}`;
-    });
     renderRecipeBook();
   }
 
@@ -473,31 +525,52 @@
     }
   }
 
-  function chooseRecipe(name) {
+  function craftRecipe(name) {
+    if (!gameStarted) return toast("Start survival first.");
+    if (!recipes[name]) return;
+    if (isBuildRecipe(name) && (pendingBuild[name] || 0) > 0) {
+      selectBuildItem(name);
+      recipeBookEl.hidden = true;
+      return toast(`${label(name)} ready to place.`);
+    }
+    if (!canAfford(name)) return toast(`Need ${recipeText(name)}.`);
+    if (!craft(name, name !== "bandage")) return;
+    recipeBookEl.hidden = true;
     if (isBuildRecipe(name)) {
-      buildChoice = name;
-      selected = 8;
-      buildMode = true;
-      heldItem = name;
-      renderHotbar();
-      renderRecipes();
+      selectBuildItem(name);
+      return toast(`${label(name)} crafted. Click to place it.`);
+    }
+    toast(`${label(name)} crafted into inventory.`);
+  }
+
+  function selectBuildItem(name) {
+    buildChoice = name;
+    buildMode = true;
+    selected = 8;
+    heldItem = name;
+    renderHotbar();
+    renderRecipes();
+  }
+
+  function chooseRecipe(name) {
+    recipeBookEl.hidden = true;
+    if (isBuildRecipe(name)) {
+      selectBuildItem(name);
       if ((pendingBuild[name] || 0) > 0) {
-        recipeBookEl.hidden = true;
         return toast(`Holding ${label(name)} to place.`);
       }
-      if (canAfford(name)) {
-        craft(name, true);
-        recipeBookEl.hidden = true;
-        return;
-      }
+      if (canAfford(name)) return craftRecipe(name);
       return toast(`Selected ${label(name)}. Gather the recipe materials to build it.`);
     }
-    craft(name, true);
-    if (pendingBuild[name] > 0) recipeBookEl.hidden = true;
+    craftRecipe(name);
   }
 
   function isBuildRecipe(name) {
     return Boolean(recipes[name]) && !["bandage", "spear"].includes(name);
+  }
+
+  function craftCycleChoices() {
+    return Object.keys(recipes).filter((name) => isBuildRecipe(name) || name === "bandage");
   }
 
   function canAfford(name) {
@@ -505,67 +578,16 @@
     return Boolean(recipe) && Object.entries(recipe).every(([res, qty]) => (state.resources[res] || 0) >= qty);
   }
 
-  function toggleInventory() {
-    inventoryEl.hidden = !inventoryEl.hidden;
-    if (!inventoryEl.hidden) recipeBookEl.hidden = true;
-    updateInventory();
-  }
-
   function toggleRecipeBook() {
     recipeBookEl.hidden = !recipeBookEl.hidden;
-    if (!recipeBookEl.hidden) inventoryEl.hidden = true;
     renderRecipeBook();
-  }
-
-  function updateInventory() {
-    if (inventoryEl.hidden) return;
-    inventoryGridEl.innerHTML = "";
-    for (const key of inventoryOrder) {
-      const item = document.createElement("button");
-      item.className = "inventory-item";
-      item.type = "button";
-      item.innerHTML = `<b>${label(key)}</b><span>${state.resources[key] || 0}</span>`;
-      item.addEventListener("click", () => selectInventoryItem(key));
-      inventoryGridEl.append(item);
-    }
-  }
-
-  function selectInventoryItem(key) {
-    const amount = state.resources[key] || 0;
-    const direct = {
-      bandage: 5,
-      glass: 7,
-      rawFish: 6,
-      cookedFish: 6,
-      sharkMeat: 6,
-      meat: 6,
-      coconut: 6,
-      tomato: 6
-    }[key];
-    if (direct !== undefined) {
-      selected = direct;
-      buildMode = false;
-      heldItem = key;
-      if (direct === 6) selectedFood = key;
-      renderHotbar();
-      toast(amount > 0 ? `Holding ${label(key)}.` : `Selected ${label(key)}. You do not have any yet.`);
-      return;
-    }
-    if (isBuildRecipe(key)) {
-      buildChoice = key;
-      buildMode = true;
-      selected = 8;
-    }
-    heldItem = key;
-    renderHotbar();
-    toast(amount > 0 ? `Holding ${label(key)}.` : `Selected ${label(key)}. You do not have any yet.`);
   }
 
   function selectHeldTool(id) {
     const idx = hotbar.findIndex((item) => item.id === id);
     if (idx >= 0) {
       selected = idx;
-      buildMode = id === "build";
+      buildMode = false;
       heldItem = id;
       renderHotbar();
     }
@@ -583,6 +605,7 @@
       });
       const data = await res.json();
       serverPlayerId = data.id;
+      remotePlayers = (data.players || []).filter((p) => p.id !== serverPlayerId);
     } catch {
       serverPlayerId = null;
     }
@@ -595,6 +618,7 @@
     const local = { name: playerName, level: state.player.level, xp: state.player.totalXp || 0 };
     if (location.protocol === "file:" || !serverPlayerId) {
       scoreboardRows = [local];
+      remotePlayers = [];
       renderScoreboard();
       return;
     }
@@ -607,6 +631,7 @@
           name: playerName,
           x: state.player.x,
           y: state.player.y,
+          facing: state.player.facing,
           level: state.player.level,
           xp: state.player.totalXp || 0,
           health: state.player.health
@@ -614,9 +639,11 @@
       });
       const data = await res.json();
       scoreboardRows = data.scoreboard || [local];
+      remotePlayers = (data.players || []).filter((p) => p.id !== serverPlayerId);
       renderScoreboard();
     } catch {
       scoreboardRows = [local];
+      remotePlayers = [];
       renderScoreboard();
     }
   }
@@ -683,10 +710,16 @@
     if (p.hunger <= 0 || p.thirst <= 0) hurt((p.hunger <= 0 && p.thirst <= 0 ? 7 : 4) * dt, "Starvation and dehydration are winning.");
 
     const inWater = !isOnRaft(p) && !isOnIsland(p);
+    if (inWater) {
+      p.swimTime = clamp((p.swimTime || 0) + dt, 0, DROWN_TIME + 8);
+      if (p.swimTime >= DROWN_TIME) hurt(12 * dt, "You are drowning.");
+    } else {
+      p.swimTime = Math.max(0, (p.swimTime || 0) - dt * 6);
+    }
     const exhausted = p.stamina <= 0;
     const sprinting = (keys.has("ShiftLeft") || keys.has("ShiftRight")) && p.stamina > 4;
-    const baseSpeed = (exhausted ? 48 : 118) + (exhausted ? 0 : p.speed * 9 + p.agility * 5) + (inWater ? -32 : 0);
-    const speed = sprinting ? baseSpeed * 1.55 : baseSpeed;
+    const baseSpeed = inWater ? (exhausted ? 22 : 48 + p.speed * 3 + p.agility * 2) : (exhausted ? 48 : 118) + (exhausted ? 0 : p.speed * 9 + p.agility * 5);
+    const speed = sprinting ? baseSpeed * (inWater ? 1.12 : 1.55) : baseSpeed;
     let mx = (keys.has("KeyD") ? 1 : 0) - (keys.has("KeyA") ? 1 : 0);
     let my = (keys.has("KeyS") ? 1 : 0) - (keys.has("KeyW") ? 1 : 0);
     if (activeCannon) {
@@ -710,10 +743,11 @@
       const a = angleTo(screenCenterWorld(), mouseWorld());
       const dx = Math.cos(a) * 72 * dt;
       const dy = Math.sin(a) * 72 * dt;
-      moveRaft(dx, dy);
-      p.x += dx;
-      p.y += dy;
-      rowingTimer += dt * 9;
+      if (moveRaft(dx, dy)) {
+        p.x += dx;
+        p.y += dy;
+        rowingTimer += dt * 9;
+      }
       }
     } else {
       rowingTimer = Math.max(0, rowingTimer - dt * 7);
@@ -725,14 +759,14 @@
     updateShark(dt);
     updateStructures(dt);
     updateProjectiles(dt);
+    updateWorldRespawns(dt);
     updateParticles(dt);
 
-    if (state.debris.length < 90) spawnDebris();
+    if (state.debris.length < 135) spawnDebris();
     state.camera.x += (p.x - state.camera.x) * 0.12;
     state.camera.y += (p.y - state.camera.y) * 0.12;
     updateMouseWorld();
     updateHud();
-    updateInventory();
     updateServerMode(dt);
   }
 
@@ -771,6 +805,10 @@
   }
 
   function moveRaft(dx, dy) {
+    if (raftWouldHitIsland(dx, dy)) {
+      toast("The raft scrapes the island shore.");
+      return false;
+    }
     state.raftOffset.x += dx;
     state.raftOffset.y += dy;
     for (const st of state.structures) {
@@ -779,6 +817,21 @@
         st.y += dy;
       }
     }
+    return true;
+  }
+
+  function raftWouldHitIsland(dx, dy) {
+    for (const rt of state.raft) {
+      const r = raftTileRect(rt);
+      const corners = [
+        { x: r.x + dx + 6, y: r.y + dy + 6 },
+        { x: r.x + r.w + dx - 6, y: r.y + dy + 6 },
+        { x: r.x + dx + 6, y: r.y + r.h + dy - 6 },
+        { x: r.x + r.w + dx - 6, y: r.y + r.h + dy - 6 }
+      ];
+      if (corners.some((pt) => state.islands.some((island) => Math.hypot(pt.x - island.x, pt.y - island.y) < island.r + 8))) return true;
+    }
+    return false;
   }
 
   function updateDebris(dt) {
@@ -802,6 +855,7 @@
           d.y = next.y;
         }
       }
+      d.life -= dt;
       d.bob += dt * 3;
       if (!d.stopped && d.y > WORLD - 120) {
         d.y = 120;
@@ -809,7 +863,7 @@
       }
       if (dist(d, state.player) < 42) collectDebris(d);
     }
-    state.debris = state.debris.filter((d) => !d.dead);
+    state.debris = state.debris.filter((d) => !d.dead && d.life > 0);
   }
 
   function shoreCollision(p) {
@@ -820,9 +874,14 @@
     d.dead = true;
     if (d.type === "barrel") {
       const haul = ["wood", "wood", "leaves", "scrap", "cloth", "rope", "glass"];
-      for (let i = 0; i < 4; i++) addRes(haul[Math.floor(Math.random() * haul.length)], 1);
+      const found = {};
+      for (let i = 0; i < 4; i++) {
+        const item = haul[Math.floor(Math.random() * haul.length)];
+        found[item] = (found[item] || 0) + 1;
+      }
+      for (const [item, qty] of Object.entries(found)) addRes(item, qty);
       gainXp(5);
-      toast("Barrel cracked open. Good haul.");
+      toast(`Barrel: ${Object.entries(found).map(([item, qty]) => `${qty} ${label(item).toLowerCase()}`).join(", ")}.`);
       burst(d.x, d.y, "#d89a54", 10);
       return;
     }
@@ -883,30 +942,66 @@
       const near = dist(a, p);
       let vx = Math.cos(a.wander) * 0.25;
       let vy = Math.sin(a.wander) * 0.25;
-      const noticeRange = a.type === "crab" ? 55 : a.type === "pig" ? 90 : 125;
-      if (near < noticeRange) {
+      const playerIsland = islandAt(p);
+      const crocodileOnLand = a.type === "crocodile" && playerIsland && a.homeIsland === playerIsland;
+      const noticeRange = a.type === "crocodile" ? 999 : a.type === "crab" ? 55 : a.type === "pig" ? 90 : 125;
+      if (crocodileOnLand || near < noticeRange) {
         const aa = angleTo(a, p);
         vx = Math.cos(aa);
         vy = Math.sin(aa);
+        a.wander = aa;
       } else if (Math.random() < dt * 0.8) {
         a.wander += rnd(-0.9, 0.9);
       }
+      if (Math.abs(vx) + Math.abs(vy) > 0.05) a.wander = Math.atan2(vy, vx);
       const charge = a.type === "elephant" && near < 85 ? 1.25 : 1;
       a.x += vx * a.speed * charge * dt;
       a.y += vy * a.speed * charge * dt;
-      resolveWallCollision(a, a.type === "crab" ? 15 : 22);
+      if (a.type === "crocodile") damageBlockingStructure(a);
+      resolveWallCollision(a, a.type === "crab" ? 15 : a.type === "crocodile" ? 24 : 22);
       const island = nearestIsland(a);
-      if (island && dist(a, island) > island.r * 0.88) {
+      if (a.type === "crocodile" && a.homeIsland && dist(a, a.homeIsland) > a.homeIsland.r + 92) {
+        const back = angleTo(a, a.homeIsland);
+        a.x += Math.cos(back) * a.speed * 2.2 * dt;
+        a.y += Math.sin(back) * a.speed * 2.2 * dt;
+        a.wander = back;
+      } else if (a.type !== "crocodile" && island && dist(a, island) > island.r * 0.88) {
         const back = angleTo(a, island);
         a.x += Math.cos(back) * a.speed * 2 * dt;
         a.y += Math.sin(back) * a.speed * 2 * dt;
+        a.wander = back;
       }
-      if (near < 28 && a.cd <= 0) {
+      if (a.type === "crocodile" && (!playerIsland || a.homeIsland !== playerIsland)) continue;
+      if (near < (a.type === "crocodile" ? 34 : 28) && a.cd <= 0) {
         hurt(a.dmg, `${cap(a.type)} hit you.`);
-        a.cd = a.type === "elephant" ? 1.4 : 0.9;
+        a.cd = a.type === "crocodile" ? 1.25 : a.type === "elephant" ? 1.4 : 0.9;
       }
     }
     state.animals = state.animals.filter((a) => !a.dead);
+  }
+
+  function damageBlockingStructure(a) {
+    if (a.cd > 0) return;
+    let target = null;
+    let bestD = 46;
+    for (const st of state.structures) {
+      if (st.base !== "island") continue;
+      if (a.homeIsland && dist(st, a.homeIsland) > a.homeIsland.r + 20) continue;
+      const d = dist(a, st) - footprintRadius(st.type);
+      if (d < bestD) {
+        bestD = d;
+        target = st;
+      }
+    }
+    if (!target) return;
+    target.hp -= 16;
+    a.cd = 1.1;
+    burst(target.x, target.y, "#87a85d", 8);
+    toast("Crocodile is tearing through your blocks.");
+    if (target.hp <= 0) {
+      state.structures = state.structures.filter((st) => st !== target);
+      if (activeCannon === target) activeCannon = null;
+    }
   }
 
   function updateShark(dt) {
@@ -918,25 +1013,34 @@
       s.aggro = Math.max(0, s.aggro - dt);
       s.finBob += dt * 2.4;
       if (Math.random() < dt * 0.25) s.wander += rnd(-0.65, 0.65);
-      const aggro = s.aggro > 0;
+      const aggro = s.aggressive || s.aggro > 0;
       const target = land ? sharkWaterPoint(land, s) : aggro && isOnRaft(p) ? nearestRaftEdge(s) : aggro ? p : null;
-      const a = target ? (s.flee > 0 ? angleTo(target, s) : angleTo(s, target)) : s.wander;
+      let a = target ? (s.flee > 0 ? angleTo(target, s) : angleTo(s, target)) : s.wander;
+      a = steerAroundIslands(s, a);
       const spd = s.flee > 0 ? 125 : aggro ? 105 : 42;
       s.x += Math.cos(a) * spd * dt;
       s.y += Math.sin(a) * spd * dt;
+      for (const other of state.sharks) {
+        if (other === s) continue;
+        const gap = dist(s, other);
+        if (gap > 0 && gap < 120) {
+          s.x += ((s.x - other.x) / gap) * (120 - gap) * 0.18 * dt;
+          s.y += ((s.y - other.y) / gap) * (120 - gap) * 0.18 * dt;
+        }
+      }
       keepSharkOffLand(s);
       resolveWallCollision(s, 28);
       if (aggro && !land && !isOnRaft(p) && dist(s, p) < 46 && s.bite <= 0) {
-        hurt(24, "The shark bit you.");
+        hurt(SHARK_BITE_DAMAGE, "The shark bit you.");
         s.bite = 1.3;
       }
       const edge = nearestRaftEdge(s);
       if (aggro && isOnRaft(p) && dist(s, edge) < 42 && s.bite <= 0 && state.raft.length > 2) {
         const victim = state.raft[Math.floor(Math.random() * state.raft.length)];
-        damageRaftBlock(victim, 20);
+        damageRaftBlock(victim, SHARK_RAFT_DAMAGE);
         s.bite = 2.2;
         toast("Angry shark is chewing the raft.");
-        if (victim.hp <= 0) state.raft = state.raft.filter((rt) => rt !== victim);
+        if (victim.hp <= 0) breakRaftTile(victim);
       }
     }
   }
@@ -951,6 +1055,25 @@
       x: island.x + Math.cos(a) * (island.r + 90),
       y: island.y + Math.sin(a) * (island.r + 90)
     };
+  }
+
+  function steerAroundIslands(entity, desiredAngle) {
+    let angle = desiredAngle;
+    for (const island of state.islands) {
+      const d = dist(entity, island);
+      const look = {
+        x: entity.x + Math.cos(angle) * 135,
+        y: entity.y + Math.sin(angle) * 135
+      };
+      const aboutToHit = Math.hypot(look.x - island.x, look.y - island.y) < island.r + 88;
+      if (d > island.r + 230 && !aboutToHit) continue;
+      const away = angleTo(island, entity);
+      const side = shortAngle(angle - away) >= 0 ? 1 : -1;
+      const tangent = away + side * Math.PI / 2;
+      const target = d < island.r + 72 ? away : tangent;
+      angle += shortAngle(target - angle) * (aboutToHit ? 0.85 : 0.42);
+    }
+    return angle;
   }
 
   function keepSharkOffLand(s) {
@@ -978,6 +1101,15 @@
       return;
     }
     rt.hp -= amount;
+  }
+
+  function breakRaftTile(rt) {
+    if (state.raft.length <= 2) return;
+    const doomed = state.structures.filter((st) => st.base === "raft" && raftAt(st.x, st.y) === rt);
+    state.structures = state.structures.filter((st) => !doomed.includes(st));
+    if (doomed.includes(activeCannon)) activeCannon = null;
+    state.raft = state.raft.filter((tile) => tile !== rt);
+    burst(raftTileRect(rt).x + TILE / 2, raftTileRect(rt).y + TILE / 2, "#d89a54", 14);
   }
 
   function structureOnTile(rt) {
@@ -1118,9 +1250,75 @@
       const c = { x: r.x + TILE / 2, y: r.y + TILE / 2 };
       if (dist(c, shot) > shot.radius + TILE * 0.35) continue;
       rt.hp -= Math.round(shot.damage * 0.75);
-      if (rt.hp <= 0 && state.raft.length > 2) state.raft = state.raft.filter((tile) => tile !== rt);
+      if (rt.hp <= 0 && state.raft.length > 2) breakRaftTile(rt);
     }
     gainXp(4);
+  }
+
+  function updateWorldRespawns(dt) {
+    for (const island of state.islands) {
+      for (const tree of island.trees) {
+        if (!tree.dead) continue;
+        tree.respawn = Math.max(0, (tree.respawn || 0) - dt);
+        if (tree.respawn <= 0) {
+          const p = openIslandSpot(island, 0.78, 24);
+          tree.x = p.x;
+          tree.y = p.y;
+          tree.hp = tree.maxHp || 40;
+          tree.dead = false;
+        }
+      }
+      for (const loot of island.loot) {
+        if (!loot.dead || loot.type !== "tomato") continue;
+        loot.respawn = Math.max(0, (loot.respawn || 0) - dt);
+        if (loot.respawn <= 0) {
+          const p = openIslandSpot(island, 0.86, 18);
+          loot.x = p.x;
+          loot.y = p.y;
+          loot.dead = false;
+        }
+      }
+    }
+    for (const pending of state.animalRespawns) pending.time -= dt;
+    const ready = state.animalRespawns.filter((pending) => pending.time <= 0);
+    state.animalRespawns = state.animalRespawns.filter((pending) => pending.time > 0);
+    for (const pending of ready) {
+      const island = pending.island || nearestIsland(state.player);
+      const spot = pending.type === "crocodile" ? waterPointAroundIsland(island, rnd(38, 84)) : openIslandSpot(island, 0.82, 28);
+      state.animals.push(animal(pending.type, spot, island));
+    }
+    const playerIsland = islandAt(state.player);
+    if (playerIsland) {
+      state.crocTimer -= dt;
+      if (state.crocTimer <= 0) {
+        const crocsHere = state.animals.filter((a) => a.type === "crocodile" && a.homeIsland === playerIsland && !a.dead).length;
+        if (crocsHere < 2) {
+          state.animals.push(animal("crocodile", waterPointAroundIsland(playerIsland, rnd(34, 76)), playerIsland));
+          toast("A crocodile is swimming in from the shore.");
+        }
+        state.crocTimer = rnd(35, 60);
+      }
+    } else {
+      state.crocTimer = Math.max(10, state.crocTimer);
+    }
+  }
+
+  function waterPointAroundIsland(island, extra = 54) {
+    const a = rnd(0, TAU);
+    const r = island.r + extra;
+    return { x: island.x + Math.cos(a) * r, y: island.y + Math.sin(a) * r };
+  }
+
+  function openIslandSpot(island, scale, radius) {
+    for (let i = 0; i < 30; i++) {
+      const p = pointOnIsland(island, scale);
+      const occupiedByStructure = state.structures.some((st) => dist(st, p) < footprintRadius(st.type) + radius);
+      const occupiedByTree = island.trees.some((tree) => !tree.dead && dist(tree, p) < radius + 18);
+      const occupiedByAnimal = state.animals.some((a) => !a.dead && dist(a, p) < radius + 18);
+      const inWreck = island.shipwreck && dist(island.shipwreck, p) < 76;
+      if (!occupiedByStructure && !occupiedByTree && !occupiedByAnimal && !inWreck) return p;
+    }
+    return pointOnIsland(island, scale);
   }
 
   function updateParticles(dt) {
@@ -1154,7 +1352,7 @@
     if (activeCannon) return fireCannon(activeCannon);
     if (state.player.stamina <= 0) return toast("Too exhausted to act. Rest for a moment.");
     const id = hotbar[selected].id;
-    if (buildMode || id === "build") return placeBuild();
+    if (buildMode) return placeBuild();
     if (id === "rod") return useRod();
     if (id === "axe") return swing("axe");
     if (id === "spear") return swing("spear");
@@ -1242,7 +1440,7 @@
         rt.hp -= damage;
         burst(c.x, c.y, "#d89a54", 8);
         if (rt.hp <= 0 && state.raft.length > 2) {
-          state.raft = state.raft.filter((tile) => tile !== rt);
+          breakRaftTile(rt);
           toast("Raft tile chopped apart.");
         } else {
           toast("Raft tile damaged.");
@@ -1272,14 +1470,15 @@
   }
 
   function respawnShark(shark) {
-    const a = rnd(0, TAU);
-    shark.x = state.player.x + Math.cos(a) * rnd(760, 1150);
-    shark.y = state.player.y + Math.sin(a) * rnd(760, 1150);
-    shark.hp = 90;
+    const p = randomOceanPoint(700, state.player, state.islands);
+    shark.x = p.x;
+    shark.y = p.y;
+    shark.hp = SHARK_HP;
     shark.bite = 0;
     shark.flee = 0;
-    shark.aggro = 0;
-    shark.wander = a + Math.PI / 2;
+    shark.aggressive = Math.random() < 0.25;
+    shark.aggro = shark.aggressive ? 99 : 0;
+    shark.wander = rnd(0, TAU);
   }
 
   function killAnimal(a) {
@@ -1287,9 +1486,11 @@
     const drops = a.type === "crab" ? 1 : a.type === "pig" ? 2 : 4;
     addRes("meat", drops);
     if (a.type !== "crab") addRes("scrap", 1);
+    if (a.homeIsland && a.type === "crab") state.animalRespawns.push({ type: a.type, island: a.homeIsland, time: rnd(300, 480) });
+    if (a.homeIsland && a.type === "crocodile") state.animalRespawns.push({ type: a.type, island: a.homeIsland, time: rnd(45, 75) });
     gainXp(a.xp);
     burst(a.x, a.y, "#ff8f75", 16);
-    toast(`${cap(a.type)} hunted. Meat added.`);
+    toast(`${cap(a.type)} hunted. Raw meat added.`);
   }
 
   function chopTree(reach, targetAngle, damage) {
@@ -1302,6 +1503,7 @@
           burst(tree.x, tree.y, "#75ca57", 8);
           if (tree.hp <= 0) {
             tree.dead = true;
+            tree.respawn = rnd(360, 600);
             addRes("wood", 5);
             addRes("leaves", 4);
             addRes("coconut", 2);
@@ -1365,10 +1567,23 @@
       for (const loot of island.loot) {
         if (!loot.dead && dist(p, loot) < 46) {
           loot.dead = true;
+          if (loot.type === "tomato") loot.respawn = 300;
           addRes(loot.type, loot.type === "tomato" ? 2 : 1);
           gainXp(3);
           toast(`Picked up ${loot.type}.`);
           return;
+        }
+      }
+      const wreck = island.shipwreck;
+      if (wreck && dist(p, wreck) < 135) {
+        for (const loot of wreck.loot) {
+          if (!loot.dead && dist(p, loot) < 42) {
+            loot.dead = true;
+            addRes(loot.type, loot.qty || 1);
+            gainXp(5);
+            toast(`Shipwreck loot: ${loot.qty || 1} ${label(loot.type).toLowerCase()}.`);
+            return;
+          }
         }
       }
     }
@@ -1389,18 +1604,22 @@
     if (st.type === "grill") {
       if (st.ready) {
         st.ready = false;
-        addRes("cookedFish", 1);
+        addRes(st.cooking === "rawFish" ? "cookedFish" : "cookedMeat", 1);
+        st.cooking = null;
         gainXp(5);
-        return toast("Collected cooked fish.");
+        return toast("Collected cooked food.");
       }
-      if (st.timer <= 0 && state.resources.rawFish > 0) {
-        state.resources.rawFish--;
+      const cookable = state.resources.rawFish > 0 ? "rawFish" : state.resources.sharkMeat > 0 ? "sharkMeat" : state.resources.meat > 0 ? "meat" : null;
+      if (st.timer <= 0 && cookable) {
+        state.resources[cookable]--;
+        st.cooking = cookable;
         st.timer = GRILL_TIME;
         st.maxTimer = GRILL_TIME;
         st.ready = false;
-        return toast("Raw fish is cooking.");
+        renderHotbar();
+        return toast(`${label(cookable)} is cooking.`);
       }
-      return toast("Need raw fish for the grill.");
+      return toast("Need raw fish or raw meat for the grill.");
     }
     if (st.type === "waterMaker") {
       if (st.ready) {
@@ -1410,7 +1629,6 @@
         state.player.thirst = clamp(state.player.thirst + 34, 0, 100);
         gainXp(4);
         renderHotbar();
-        updateInventory();
         return toast("Drank clean water. Glass returned.");
       }
       if (st.timer <= 0 && state.resources.glass > 0) {
@@ -1420,7 +1638,6 @@
         st.maxTimer = WATER_TIME;
         st.ready = false;
         renderHotbar();
-        updateInventory();
         return toast("Water maker is distilling.");
       }
       return toast("Need an empty glass.");
@@ -1450,12 +1667,15 @@
   }
 
   function craft(name, holdAfterCraft = false) {
-    if (!gameStarted) return;
-    if (!spendStamina(3)) return;
+    if (!gameStarted) return false;
+    if (!spendStamina(3)) return false;
     const recipe = recipes[name];
-    if (!recipe) return;
+    if (!recipe) return false;
     for (const [res, qty] of Object.entries(recipe)) {
-      if ((state.resources[res] || 0) < qty) return toast(`Need ${qty} ${res}.`);
+      if ((state.resources[res] || 0) < qty) {
+        toast(`Need ${qty} ${res}.`);
+        return false;
+      }
     }
     for (const [res, qty] of Object.entries(recipe)) state.resources[res] -= qty;
     if (name === "bandage") {
@@ -1469,7 +1689,6 @@
       pendingBuild[name] = (pendingBuild[name] || 0) + 1;
       buildChoice = name;
       buildMode = true;
-      selected = 8;
       heldItem = name;
       renderHotbar();
       toast(`${label(name)} ready to place.`);
@@ -1478,11 +1697,18 @@
     gainXp(7);
     renderHotbar();
     renderRecipes();
-    updateInventory();
+    return true;
   }
 
   function placeBuild() {
     updateMouseWorld();
+    if (!isBuildRecipe(buildChoice)) {
+      if (buildChoice === "bandage") {
+        if (craft("bandage", false)) toast("Bandage crafted into inventory.");
+        return;
+      }
+      return toast(`${label(buildChoice)} cannot be placed.`);
+    }
     if (!spendStamina(6)) return;
     if (!buildMode) buildMode = true;
     const spot = buildPlacementPoint();
@@ -1522,7 +1748,6 @@
     gainXp(7);
     renderHotbar();
     renderRecipes();
-    updateInventory();
     return true;
   }
 
@@ -1663,18 +1888,16 @@
     if (!gameStarted || !spendStamina(1)) return;
     buildAngle = (buildAngle + Math.PI / 12) % TAU;
     buildMode = true;
-    selected = 8;
     renderHotbar();
     toast(`Build angle: ${Math.round((buildAngle * 180) / Math.PI)} degrees.`);
   }
 
   function cycleBuildChoice() {
     if (!gameStarted || !spendStamina(1)) return;
-    const choices = Object.keys(recipes).filter(isBuildRecipe);
+    const choices = craftCycleChoices();
     const current = choices.includes(buildChoice) ? choices.indexOf(buildChoice) : -1;
     buildChoice = choices[(current + 1) % choices.length];
     buildMode = true;
-    selected = 8;
     heldItem = buildChoice;
     renderHotbar();
     renderRecipes();
@@ -1735,21 +1958,18 @@
 
   function eatSpecificFood(food) {
     const r = state.resources;
+    if (!["cookedFish", "cookedMeat", "rawFish", "tomato", "coconut"].includes(food)) return false;
     if ((r[food] || 0) <= 0) return false;
     r[food]--;
     if (food === "cookedFish") {
       state.player.hunger = clamp(state.player.hunger + 42, 0, 100);
       recoverStamina(22);
       toast("Ate cooked fish.");
-    } else if (food === "sharkMeat") {
-      state.player.hunger = clamp(state.player.hunger + 44, 0, 100);
-      state.player.thirst = clamp(state.player.thirst + 4, 0, 100);
-      recoverStamina(20);
-      toast("Ate shark meat.");
-    } else if (food === "meat") {
-      state.player.hunger = clamp(state.player.hunger + 36, 0, 100);
+    } else if (food === "cookedMeat") {
+      state.player.hunger = clamp(state.player.hunger + 40, 0, 100);
+      state.player.thirst = clamp(state.player.thirst + 3, 0, 100);
       recoverStamina(17);
-      toast("Ate meat.");
+      toast("Ate cooked meat.");
     } else if (food === "rawFish") {
       state.player.hunger = clamp(state.player.hunger + 18, 0, 100);
       state.player.thirst = clamp(state.player.thirst - 5, 0, 100);
@@ -1766,9 +1986,11 @@
       recoverStamina(8);
       toast("Coconut cracked open.");
     }
-    if ((r[food] || 0) <= 0 && selectedFood === food) selectedFood = null;
+    if ((r[food] || 0) <= 0 && selectedFood === food) {
+      selectedFood = null;
+      heldItem = null;
+    }
     renderHotbar();
-    updateInventory();
     return true;
   }
 
@@ -1841,7 +2063,6 @@
     state.resources[name] = (state.resources[name] || 0) + qty;
     renderHotbar();
     renderRecipes();
-    updateInventory();
   }
 
   function nearestIsland(p) {
@@ -1872,10 +2093,11 @@
     setMeter("hunger", p.hunger);
     setMeter("thirst", p.thirst);
     setMeter("stamina", p.stamina);
+    setMeter("breath", 100 - ((p.swimTime || 0) / DROWN_TIME) * 100);
     const currentBase = xpForLevel(p.level);
     const nextBase = xpForLevel(p.level + 1);
     setMeter("xp", ((p.totalXp - currentBase) / (nextBase - currentBase)) * 100);
-    for (const key of ["wood", "leaves", "scrap", "cloth", "rope", "glass", "rawFish", "cookedFish", "sharkMeat", "meat", "coconut", "tomato"]) {
+    for (const key of ["wood", "leaves", "scrap", "cloth", "rope", "glass", "rawFish", "cookedFish", "sharkMeat", "meat", "cookedMeat", "coconut", "tomato"]) {
       document.querySelector(`[data-res="${key}"]`).textContent = `${cap(key)} ${state.resources[key] || 0}`;
     }
     document.getElementById("level").textContent = p.level;
@@ -1892,6 +2114,7 @@
   function currentPrompt() {
     if (activeCannon) return `Cannon armed. A/D aim ${Math.round(((activeCannon.aimOffset || 0) * 180) / Math.PI)} degrees, click to fire.`;
     if (buildMode) {
+      if (!isBuildRecipe(buildChoice)) return `Craft: ${label(buildChoice)}. Click to craft if you have ${recipeText(buildChoice)}. N next.`;
       const ready = pendingBuild[buildChoice] || 0;
       return ready > 0 ? `Build: ${label(buildChoice)} (${ready}). Click to place, R rotate, N next.` : `Build: ${label(buildChoice)}. Click to craft/place if you have ${recipeText(buildChoice)}.`;
     }
@@ -1900,7 +2123,9 @@
     if (st) return `F: use ${label(st.type)}`;
     const nearLoot = state.debris.some((d) => dist(d, p) < 84) || state.islands.some((is) => is.loot.some((l) => !l.dead && dist(l, p) < 46));
     if (nearLoot) return "F: pick up";
-    if (!isOnRaft(p) && !isOnIsland(p)) return "You are swimming. Sharks hurt more out here.";
+    if (!isOnRaft(p) && !isOnIsland(p)) {
+      return p.swimTime >= DROWN_TIME ? "You are drowning. Reach land or your raft." : "Swimming is slow and drains breath.";
+    }
     return "";
   }
 
@@ -1917,15 +2142,16 @@
     drawOcean();
     drawIslands();
     drawDebris();
+    drawShark();
     drawRaft();
     drawStructures();
     drawCast();
     drawAnimals();
-    drawShark();
     drawProjectiles();
+    drawRemotePlayers();
     drawPlayer();
     drawParticles();
-    if (buildMode) drawBuildGhost();
+    if (buildMode && isBuildRecipe(buildChoice)) drawBuildGhost();
     ctx.restore();
     drawVignette(w, h);
     drawMinimap();
@@ -2010,6 +2236,61 @@
         circle(8, -12, 4);
         ctx.restore();
       }
+      if (island.shipwreck) drawShipwreck(island.shipwreck);
+    }
+  }
+
+  function drawShipwreck(wreck) {
+    ctx.save();
+    ctx.translate(wreck.x, wreck.y);
+    ctx.rotate(wreck.angle);
+    ctx.fillStyle = "#6f482d";
+    roundRect(-112, -42, 224, 84, 28);
+    ctx.fill();
+    ctx.fillStyle = "#8d613b";
+    roundRect(-96, -29, 156, 58, 18);
+    ctx.fill();
+    ctx.fillStyle = "#34251d";
+    roundRect(-78, -24, 92, 48, 12);
+    ctx.fill();
+    ctx.fillStyle = "#c49a5c";
+    ctx.fillRect(-100, -16, 183, 6);
+    ctx.fillRect(-94, 13, 172, 6);
+    ctx.fillStyle = "#15191c";
+    ctx.beginPath();
+    ctx.moveTo(52, -43);
+    ctx.lineTo(118, -24);
+    ctx.lineTo(118, 24);
+    ctx.lineTo(52, 43);
+    ctx.lineTo(74, 14);
+    ctx.lineTo(74, -14);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = "#3c2a1f";
+    ctx.lineWidth = 7;
+    ctx.beginPath();
+    ctx.moveTo(-60, -39);
+    ctx.lineTo(-44, -95);
+    ctx.moveTo(-44, -95);
+    ctx.lineTo(7, -61);
+    ctx.moveTo(-24, 39);
+    ctx.lineTo(-8, 85);
+    ctx.stroke();
+    ctx.restore();
+
+    for (const loot of wreck.loot) {
+      if (loot.dead) continue;
+      ctx.fillStyle = loot.type === "scrap" ? "#a9c3c8" : loot.type === "glass" ? "#9ae9ff" : "#d0ad62";
+      if (loot.type === "rope") {
+        ctx.strokeStyle = ctx.fillStyle;
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.arc(loot.x, loot.y, 8, 0, TAU);
+        ctx.stroke();
+      } else {
+        roundRect(loot.x - 8, loot.y - 7, 16, 14, 4);
+        ctx.fill();
+      }
     }
   }
 
@@ -2032,6 +2313,55 @@
         ctx.lineTo(10, 12);
         ctx.stroke();
       } else {
+        if (d.type === "rope") {
+          ctx.strokeStyle = "#d0ad62";
+          ctx.lineWidth = 4;
+          ctx.beginPath();
+          ctx.arc(0, 0, 11, 0.2, TAU + 0.2);
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.arc(5, 0, 6, -0.5, TAU - 0.5);
+          ctx.stroke();
+          ctx.restore();
+          continue;
+        }
+        if (d.type === "leaves") {
+          ctx.fillStyle = "#63ba57";
+          for (let i = 0; i < 4; i++) {
+            ctx.save();
+            ctx.rotate(i * 1.45 + Math.sin(d.bob) * 0.12);
+            ellipse(7, 0, 12, 5, 0);
+            ctx.restore();
+          }
+          ctx.strokeStyle = "#2f7f3d";
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          ctx.moveTo(-9, 0);
+          ctx.lineTo(10, 0);
+          ctx.stroke();
+          ctx.restore();
+          continue;
+        }
+        if (d.type === "cloth") {
+          ctx.fillStyle = "#e4e1cf";
+          ctx.beginPath();
+          ctx.moveTo(-14, -9);
+          ctx.quadraticCurveTo(-2, -14, 13, -7);
+          ctx.lineTo(10, 11);
+          ctx.quadraticCurveTo(-1, 6, -13, 10);
+          ctx.closePath();
+          ctx.fill();
+          ctx.strokeStyle = "rgba(90, 101, 104, 0.35)";
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.moveTo(-8, -6);
+          ctx.quadraticCurveTo(0, -2, 8, -5);
+          ctx.moveTo(-7, 5);
+          ctx.quadraticCurveTo(0, 1, 8, 5);
+          ctx.stroke();
+          ctx.restore();
+          continue;
+        }
         ctx.fillStyle = {
           wood: "#b87942",
           leaves: "#64b957",
@@ -2218,7 +2548,7 @@
       ctx.save();
       ctx.translate(a.x, a.y);
       ctx.rotate(a.wander);
-      ctx.fillStyle = a.hit > 0 ? "#fff2ed" : { crab: "#e37857", pig: "#d98c77", elephant: "#8d9495" }[a.type];
+      ctx.fillStyle = a.hit > 0 ? "#fff2ed" : { crab: "#e37857", pig: "#d98c77", elephant: "#8d9495", crocodile: "#4f7f4d" }[a.type];
       if (a.type === "crab") {
         ellipse(0, 0, 17, 11, 0);
         ctx.fillStyle = "#8f3e35";
@@ -2233,30 +2563,58 @@
           }
           circle(side * 15, -8, 4);
         }
+      } else if (a.type === "crocodile") {
+        ctx.fillStyle = "#416f43";
+        ellipse(-5, 0, 45, 13, 0);
+        ctx.fillStyle = "#335d37";
+        ellipse(31, 0, 25, 9, 0);
+        ctx.fillStyle = "#dfe7c8";
+        for (let x = 27; x <= 52; x += 7) {
+          ctx.beginPath();
+          ctx.moveTo(x, -5);
+          ctx.lineTo(x + 4, 0);
+          ctx.lineTo(x, 5);
+          ctx.closePath();
+          ctx.fill();
+        }
+        ctx.fillStyle = "#264a2d";
+        for (let x = -35; x <= 12; x += 9) circle(x, -9, 2.8);
+        for (let x = -35; x <= 12; x += 9) circle(x, 9, 2.8);
+        ctx.strokeStyle = "#2a4f30";
+        ctx.lineWidth = 5;
+        for (const x of [-20, 2]) {
+          ctx.beginPath();
+          ctx.moveTo(x, -9);
+          ctx.lineTo(x + 5, -25);
+          ctx.moveTo(x, 9);
+          ctx.lineTo(x + 5, 25);
+          ctx.stroke();
+        }
+        ctx.fillStyle = "#2f5732";
+        ctx.beginPath();
+        ctx.moveTo(-43, 0);
+        ctx.lineTo(-78, -11);
+        ctx.lineTo(-62, 0);
+        ctx.lineTo(-78, 11);
+        ctx.closePath();
+        ctx.fill();
+        ctx.fillStyle = "#172317";
+        circle(43, -4, 2.2);
+        circle(43, 4, 2.2);
       } else if (a.type === "pig") {
         ellipse(0, 0, 25, 15, 0);
         ctx.fillStyle = "#f4b2a4";
-        circle(18, 0, 9);
+        ellipse(18, 0, 10, 8, 0);
         ctx.fillStyle = "#5c3430";
         circle(23, -3, 2);
         circle(23, 3, 2);
         ctx.fillStyle = "#d97875";
-        ctx.beginPath();
-        ctx.moveTo(9, -12);
-        ctx.lineTo(15, -21);
-        ctx.lineTo(19, -10);
-        ctx.closePath();
-        ctx.fill();
+        circle(-14, -9, 4);
+        circle(-14, 9, 4);
       } else {
         ellipse(0, 0, 39, 23, 0);
         ctx.fillStyle = "#727b7e";
         ellipse(30, 0, 15, 11, 0);
-        ctx.strokeStyle = "#707779";
-        ctx.lineWidth = 5;
-        ctx.beginPath();
-        ctx.moveTo(36, 5);
-        ctx.quadraticCurveTo(50, 18, 39, 28);
-        ctx.stroke();
         ctx.strokeStyle = "#eee5c4";
         ctx.lineWidth = 3;
         ctx.beginPath();
@@ -2275,51 +2633,65 @@
 
   function drawShark() {
     for (const s of state.sharks) {
-      const surfaced = s.aggro > 0 || s.hp < 90;
+      const surfaced = s.aggressive || s.aggro > 0 || s.hp < SHARK_HP;
       const a = surfaced ? angleTo(s, state.player) : s.wander;
       ctx.save();
       ctx.translate(s.x, s.y + Math.sin(s.finBob) * 2);
       ctx.rotate(a);
       if (surfaced) {
-        ctx.fillStyle = "#3f5964";
-        ellipse(0, 0, 52, 18, 0);
-        ctx.fillStyle = "#d9ebef";
-        ellipse(14, 5, 26, 8, 0);
-        ctx.fillStyle = "#2f454f";
+        ctx.fillStyle = "rgba(5, 20, 28, 0.22)";
+        ellipse(-4, 8, 58, 16, 0);
+        ctx.fillStyle = "#496d7a";
+        ellipse(0, 0, 58, 16, 0);
+        ctx.fillStyle = "#d8edf1";
+        ellipse(15, 5, 30, 7, 0);
+        ctx.fillStyle = "#365562";
         ctx.beginPath();
-        ctx.moveTo(-8, -13);
-        ctx.lineTo(5, -40);
-        ctx.lineTo(15, -10);
+        ctx.moveTo(-10, -11);
+        ctx.lineTo(3, -39);
+        ctx.lineTo(16, -9);
         ctx.closePath();
         ctx.fill();
         ctx.beginPath();
-        ctx.moveTo(-43, 0);
-        ctx.lineTo(-64, -17);
-        ctx.lineTo(-57, 0);
-        ctx.lineTo(-64, 17);
+        ctx.moveTo(-44, 0);
+        ctx.lineTo(-72, -19);
+        ctx.lineTo(-61, 0);
+        ctx.lineTo(-72, 19);
+        ctx.closePath();
+        ctx.fill();
+        ctx.beginPath();
+        ctx.moveTo(-2, 10);
+        ctx.lineTo(14, 29);
+        ctx.lineTo(20, 8);
+        ctx.closePath();
+        ctx.fill();
+        ctx.beginPath();
+        ctx.moveTo(-4, -10);
+        ctx.lineTo(14, -29);
+        ctx.lineTo(21, -8);
         ctx.closePath();
         ctx.fill();
         ctx.fillStyle = "#151f24";
-        circle(25, -5, 2.4);
+        circle(29, -5, 2.3);
         ctx.strokeStyle = "#f3f7f8";
         ctx.lineWidth = 2;
         ctx.beginPath();
-        ctx.moveTo(31, 5);
-        ctx.lineTo(43, 2);
+        ctx.moveTo(34, 5);
+        ctx.lineTo(47, 2);
         ctx.stroke();
       } else {
+        ctx.fillStyle = "rgba(13, 44, 56, 0.26)";
+        ellipse(0, 10, 50, 8, 0);
         ctx.fillStyle = "#2f454f";
         ctx.beginPath();
-        ctx.moveTo(-14, 8);
-        ctx.lineTo(0, -28);
-        ctx.lineTo(18, 8);
+        ctx.moveTo(-16, 9);
+        ctx.lineTo(0, -31);
+        ctx.lineTo(20, 9);
         ctx.closePath();
         ctx.fill();
-        ctx.fillStyle = "rgba(20,48,58,0.28)";
-        ellipse(0, 10, 42, 8, 0);
       }
       ctx.restore();
-      if (surfaced) healthBar(s.x, s.y - 34, s.hp / 90, 46);
+      if (surfaced) healthBar(s.x, s.y - 34, s.hp / SHARK_HP, 46);
     }
   }
 
@@ -2343,6 +2715,37 @@
       ctx.lineTo(-28, 0);
       ctx.stroke();
       ctx.restore();
+    }
+  }
+
+  function drawRemotePlayers() {
+    for (const other of remotePlayers) {
+      if (!other || other.health <= 0) continue;
+      ctx.save();
+      ctx.translate(other.x, other.y);
+      ctx.rotate(other.facing || 0);
+      ctx.globalAlpha = 0.88;
+      ctx.fillStyle = "#26324a";
+      ellipse(0, 0, 16, 13, 0);
+      ctx.fillStyle = "#f1c79f";
+      circle(10, 0, 9);
+      ctx.strokeStyle = "#f5e8cd";
+      ctx.lineWidth = 4;
+      ctx.beginPath();
+      ctx.moveTo(4, -10);
+      ctx.lineTo(24, -15);
+      ctx.moveTo(4, 10);
+      ctx.lineTo(24, 15);
+      ctx.stroke();
+      ctx.restore();
+      ctx.fillStyle = "rgba(5, 16, 22, 0.65)";
+      roundRect(other.x - 31, other.y - 38, 62, 16, 6);
+      ctx.fill();
+      ctx.fillStyle = "#e9f9fb";
+      ctx.font = "800 10px system-ui, sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText(other.name || "Player", other.x, other.y - 27);
+      healthBar(other.x, other.y - 18, (other.health || 100) / 100, 36);
     }
   }
 
@@ -2372,11 +2775,13 @@
     ctx.fillStyle = "#f0c39b";
     circle(26 + leftReach, -16, 4.6);
     circle(26 + rightReach, 16, 4.6);
-    const inventoryHeld = heldItem && !hotbar.some((slot) => slot.id === heldItem) && !isBuildRecipe(heldItem);
     if (buildMode) {
       drawHeldBuildItem();
-    } else if (inventoryHeld) {
-      drawHeldInventoryItem(heldItem);
+    } else if (item === "food") {
+      const food = selectedFood || availableFoods()[0];
+      if (food) drawHeldResourceItem(food);
+    } else if (hotbarResource(item) || availableFoods().includes(item)) {
+      drawHeldResourceItem(item);
     } else if (item === "spear") {
       drawHeldSpear();
     } else if (item === "axe") {
@@ -2512,7 +2917,7 @@
     ctx.restore();
   }
 
-  function drawHeldInventoryItem(name) {
+  function drawHeldResourceItem(name) {
     ctx.save();
     ctx.translate(35, 0);
     const color = {
@@ -2526,6 +2931,7 @@
       cookedFish: "#f0a85d",
       sharkMeat: "#d96d70",
       meat: "#c75b55",
+      cookedMeat: "#b96242",
       coconut: "#82522e",
       tomato: "#d94b45"
     }[name] || "#d8eef4";
@@ -2603,7 +3009,7 @@
       mctx.fillRect(r.x * scale, r.y * scale, Math.max(1, TILE * scale), Math.max(1, TILE * scale));
     }
     for (const shark of state.sharks) {
-      mctx.fillStyle = shark.aggro > 0 ? "#ff6576" : "#2f454f";
+      mctx.fillStyle = shark.aggressive || shark.aggro > 0 ? "#ff6576" : "#2f454f";
       mctx.beginPath();
       mctx.arc(shark.x * scale, shark.y * scale, 2.2, 0, TAU);
       mctx.fill();
@@ -2673,7 +3079,10 @@
       chest: "Chest",
       wall: "Wall",
       torch: "Torch",
-      cannon: "Cannon"
+      cannon: "Cannon",
+      sharkMeat: "Raw Shark Meat",
+      meat: "Raw Meat",
+      cookedMeat: "Cooked Meat"
     }[s] || cap(s);
   }
 })();
