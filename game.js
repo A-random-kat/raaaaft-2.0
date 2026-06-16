@@ -31,6 +31,11 @@
   const TILE = 72;
   const WORLD = 9600;
   const STRUCTURE_RADIUS = 21;
+  const TREE_COLLISION_RADIUS = 18;
+  const INITIAL_DEBRIS = 150;
+  const DEBRIS_TARGET = 140;
+  const SERVER_SYNC_INTERVAL = 0.45;
+  const SERVER_REQUEST_TIMEOUT = 2500;
   const SPAWN_CLEARANCE = 520;
   const SPAWN_POINTS = [
     { x: 520, y: 520 },
@@ -178,6 +183,10 @@
   let remotePlayers = [];
   let serverAggressiveSharks = [];
   let serverProjectiles = [];
+  let serverRetryTimer = 0;
+  let serverRetryDelay = 1;
+  let serverMisses = 0;
+  let serverEverConnected = false;
   let remoteWorlds = new Map();
   let activeCannon = null;
   let musketCooldown = 0;
@@ -194,6 +203,7 @@
   let usingLocalMultiplayer = false;
   let localPeerId = `local-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   const localPeers = new Map();
+  let lastHudRender = 0;
 
   const state = createWorld();
 
@@ -338,7 +348,7 @@
   }
 
   function seedWorld() {
-    for (let i = 0; i < 240; i++) spawnDebris();
+    for (let i = 0; i < INITIAL_DEBRIS; i++) spawnDebris();
     const specs = [
       { x: 1200, y: 1100, r: 215, kind: "small" },
       { x: 3000, y: 950, r: 260, kind: "medium", wreck: true },
@@ -422,7 +432,7 @@
     if (roll < 0.46) return "scrap";
     if (roll < 0.66) return "glass";
     if (roll < 0.83) return "rope";
-    if (roll < 0.96) return "iron";
+    if (roll < 0.97) return "iron";
     return "steel";
   }
 
@@ -438,7 +448,7 @@
 
   function spawnDebris() {
     const types = ["wood", "leaves", "scrap", "cloth", "rope", "glass", "barrel"];
-    const type = types[Math.floor(Math.random() * types.length)];
+    const type = Math.random() < 0.025 ? "steel" : types[Math.floor(Math.random() * types.length)];
     state.debris.push({
       x: rnd(260, WORLD - 260),
       y: rnd(260, WORLD - 260),
@@ -567,7 +577,12 @@
     serverSyncInFlight = false;
     serverPlayerId = null;
     serverSpawnStamp = 0;
+    serverRetryTimer = 0;
+    serverRetryDelay = 1;
+    serverMisses = 0;
+    serverEverConnected = false;
     localSpawnApplied = false;
+    lastHudRender = 0;
     localPeers.clear();
     serverAggressiveSharks = [];
     remoteWorlds.clear();
@@ -1348,7 +1363,7 @@
 
   async function serverPost(path, body) {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 1200);
+    const timeout = setTimeout(() => controller.abort(), SERVER_REQUEST_TIMEOUT);
     try {
       const res = await fetch(`${SERVER_API_ROOT}${path}`, {
         method: "POST",
@@ -1363,62 +1378,90 @@
     }
   }
 
-  async function joinServerMode() {
-    const local = playerNetState(localPeerId);
-    scoreboardRows = [local];
-    remotePlayers = [];
-    serverAggressiveSharks = [];
-    remoteWorlds.clear();
-    serverPlayerId = null;
+  function applyServerSnapshot(data) {
+    if (!data) return;
+    if (data.id) serverPlayerId = data.id;
     usingLocalMultiplayer = false;
+    localPeers.clear();
+    applyServerPlayerState((data.players || []).find((p) => p.id === serverPlayerId));
+    applyOwnServerWorld(data.worlds?.[serverPlayerId]);
+    remotePlayers = (data.players || []).filter((p) => p.id !== serverPlayerId);
+    applyRemoteWorlds(data.worlds || {}, serverPlayerId);
+    serverAggressiveSharks = data.serverSharks || [];
+    applyServerSharks(serverAggressiveSharks);
+    serverProjectiles = data.serverProjectiles || [];
+    scoreboardRows = data.scoreboard || [playerNetState(serverPlayerId)];
     renderScoreboard();
+  }
+
+  function markServerSuccess() {
+    serverMisses = 0;
+    serverRetryTimer = 0;
+    serverRetryDelay = 1;
+    serverEverConnected = true;
+  }
+
+  function markServerFailure() {
+    serverMisses += 1;
+    serverRetryDelay = clamp(serverRetryDelay * 1.6, 1, 8);
+    serverRetryTimer = serverRetryDelay;
+    usingLocalMultiplayer = true;
+    updateLocalMultiplayer(true);
+    if (serverMisses === 1) toast("Connection hiccup. Reconnecting...");
+  }
+
+  async function joinServerMode({ resetView = true, quiet = false } = {}) {
+    const local = playerNetState(localPeerId);
+    if (resetView) {
+      scoreboardRows = [local];
+      remotePlayers = [];
+      serverAggressiveSharks = [];
+      remoteWorlds.clear();
+      serverPlayerId = null;
+      renderScoreboard();
+    }
+    usingLocalMultiplayer = false;
     try {
       const data = await serverPost("/api/join", local);
-      serverPlayerId = data.id;
-      usingLocalMultiplayer = false;
-      localPeers.clear();
-      applyServerPlayerState((data.players || []).find((p) => p.id === serverPlayerId));
-      applyOwnServerWorld(data.worlds?.[serverPlayerId]);
-      remotePlayers = (data.players || []).filter((p) => p.id !== serverPlayerId);
-      applyRemoteWorlds(data.worlds || {}, serverPlayerId);
-      serverAggressiveSharks = data.serverSharks || [];
-      applyServerSharks(serverAggressiveSharks);
-      serverProjectiles = data.serverProjectiles || [];
-      scoreboardRows = data.scoreboard || [playerNetState(serverPlayerId)];
-      renderScoreboard();
+      applyServerSnapshot(data);
+      markServerSuccess();
     } catch {
-      serverPlayerId = null;
+      if (!quiet && !serverEverConnected) toast("Server unavailable. Using local multiplayer while retrying.");
+      markServerFailure();
       joinLocalMultiplayer();
     }
   }
 
   async function updateServerMode(dt) {
     serverSyncTimer += dt;
-    if (serverSyncTimer < 0.28) return;
-    serverSyncTimer = 0;
+    serverRetryTimer = Math.max(0, serverRetryTimer - dt);
     if (!serverPlayerId) {
-      if (!usingLocalMultiplayer) joinLocalMultiplayer();
-      else updateLocalMultiplayer();
+      updateLocalMultiplayer(usingLocalMultiplayer);
+      if (serverRetryTimer <= 0 && !serverSyncInFlight) {
+        serverSyncInFlight = true;
+        joinServerMode({ resetView: false, quiet: true }).finally(() => {
+          serverSyncInFlight = false;
+        });
+      }
       return;
     }
+    if (usingLocalMultiplayer && serverRetryTimer > 0) {
+      updateLocalMultiplayer(true);
+      return;
+    }
+    if (serverSyncTimer < SERVER_SYNC_INTERVAL) {
+      if (usingLocalMultiplayer) updateLocalMultiplayer(true);
+      return;
+    }
+    serverSyncTimer = 0;
     if (serverSyncInFlight) return;
     serverSyncInFlight = true;
     try {
       const data = await serverPost("/api/state", playerNetState(serverPlayerId));
-      if (data.id) serverPlayerId = data.id;
-      usingLocalMultiplayer = false;
-      applyServerPlayerState((data.players || []).find((p) => p.id === serverPlayerId));
-      scoreboardRows = data.scoreboard || [playerNetState(serverPlayerId)];
-      remotePlayers = (data.players || []).filter((p) => p.id !== serverPlayerId);
-      applyOwnServerWorld(data.worlds?.[serverPlayerId]);
-      applyRemoteWorlds(data.worlds || {}, serverPlayerId);
-      serverAggressiveSharks = data.serverSharks || [];
-      applyServerSharks(serverAggressiveSharks);
-      serverProjectiles = data.serverProjectiles || [];
-      renderScoreboard();
+      applyServerSnapshot(data);
+      markServerSuccess();
     } catch {
-      serverPlayerId = null;
-      joinLocalMultiplayer();
+      markServerFailure();
     } finally {
       serverSyncInFlight = false;
     }
@@ -1803,7 +1846,7 @@
     my /= len;
     p.x = clamp(p.x + mx * speed * dt, 80, WORLD - 80);
     p.y = clamp(p.y + my * speed * dt, 80, WORLD - 80);
-    resolveWallCollision(p, 15);
+    resolveWallCollision(p, 15, true);
     if (mx || my) p.facing = Math.atan2(my, mx);
     p.stamina = clamp(p.stamina + (sprinting && (mx || my) ? -28 : 8 + p.agility * 0.6) * dt, 0, 100);
 
@@ -1841,7 +1884,7 @@
     updateWorldRespawns(dt);
     updateParticles(dt);
 
-    if (state.debris.length < 180) spawnDebris();
+    if (state.debris.length < DEBRIS_TARGET) spawnDebris();
     state.camera.x += (p.x - state.camera.x) * 0.12;
     state.camera.y += (p.y - state.camera.y) * 0.12;
     updateMouseWorld();
@@ -2114,15 +2157,21 @@
         a.wander = away;
         a.x += Math.cos(away) * a.speed * 1.65 * dt;
         a.y += Math.sin(away) * a.speed * 1.65 * dt;
-        resolveWallCollision(a, 24);
+        resolveWallCollision(a, 24, true);
         continue;
       }
       const noticeRange = a.type === "crocodile" ? 999 : a.type === "crab" ? 55 : a.type === "pig" ? 90 : 125;
+      const attackRange = a.type === "crocodile" ? 34 : 28;
       if (crocodileOnLand || near < noticeRange) {
         const aa = angleTo(a, p);
-        vx = Math.cos(aa);
-        vy = Math.sin(aa);
-        a.wander = aa;
+        a.wander += shortAngle(aa - a.wander) * clamp(dt * 5.5, 0, 1);
+        if (near > attackRange * 0.86) {
+          vx = Math.cos(a.wander);
+          vy = Math.sin(a.wander);
+        } else {
+          vx = 0;
+          vy = 0;
+        }
       } else if (Math.random() < dt * 0.8) {
         a.wander += rnd(-0.9, 0.9);
       }
@@ -2131,7 +2180,7 @@
       a.x += vx * a.speed * charge * dt;
       a.y += vy * a.speed * charge * dt;
       if (a.type === "crocodile") damageBlockingStructure(a);
-      resolveWallCollision(a, a.type === "crab" ? 15 : a.type === "crocodile" ? 24 : 22);
+      resolveWallCollision(a, a.type === "crab" ? 15 : a.type === "crocodile" ? 24 : 22, true);
       const island = nearestIsland(a);
       if (a.type === "crocodile" && a.homeIsland && dist(a, a.homeIsland) > a.homeIsland.r + 92) {
         const back = angleTo(a, a.homeIsland);
@@ -2144,7 +2193,7 @@
         a.y += Math.sin(back) * a.speed * 2 * dt;
         a.wander = back;
       }
-      if (near < (a.type === "crocodile" ? 34 : 28) && a.cd <= 0) {
+      if (near < attackRange && a.cd <= 0) {
         hurt(a.dmg, `${cap(a.type)} hit you.`);
         a.cd = a.type === "crocodile" ? 1.25 : a.type === "elephant" ? 1.4 : 0.9;
       }
@@ -2187,23 +2236,26 @@
       if (Math.random() < dt * 0.25) s.wander += rnd(-0.65, 0.65);
       const aggro = s.aggressive || s.aggro > 0;
       const target = aggro ? sharkTarget(s, land) : null;
-      let a = target ? (s.flee > 0 ? angleTo(target, s) : angleTo(s, target)) : s.wander;
+      const desired = target ? (s.flee > 0 ? angleTo(target, s) : angleTo(s, target)) : s.wander;
+      let a = desired;
       a = steerAroundIslands(s, a);
       if (s.serverControlled && Number.isFinite(s.serverX) && Number.isFinite(s.serverY)) {
         const serverAim = angleTo(s, { x: s.serverX, y: s.serverY });
-        a += shortAngle(serverAim - a) * 0.55;
+        a += shortAngle(serverAim - a) * 0.35;
       }
-      const spd = s.serverControlled ? 112 : s.flee > 0 ? 125 : aggro ? 105 : 42;
+      s.wander += shortAngle(a - s.wander) * clamp(dt * (s.serverControlled ? 4.8 : 3.4), 0, 1);
+      a = s.wander;
+      const targetDistance = target ? dist(s, target) : Infinity;
+      let spd = s.serverControlled ? 112 : s.flee > 0 ? 125 : aggro ? 105 : 42;
+      if (targetDistance < 46 && s.bite > 0) spd *= 0.35;
       s.x += Math.cos(a) * spd * dt;
       s.y += Math.sin(a) * spd * dt;
       if (s.serverControlled && Number.isFinite(s.serverX) && Number.isFinite(s.serverY)) {
         const gapToServer = Math.hypot(s.serverX - s.x, s.serverY - s.y);
-        const pull = clamp(dt * (gapToServer > 420 ? 1.8 : 0.55), 0, 0.28);
+        const pull = clamp(dt * (gapToServer > 420 ? 1.2 : 0.35), 0, 0.16);
         s.x += (s.serverX - s.x) * pull;
         s.y += (s.serverY - s.y) * pull;
-        s.wander = Number.isFinite(s.serverFacing) ? s.serverFacing : a;
-      } else {
-        s.wander = a;
+        if (Number.isFinite(s.serverFacing)) s.wander += shortAngle(s.serverFacing - s.wander) * clamp(dt * 2.5, 0, 1);
       }
       for (const other of state.sharks) {
         if (other === s) continue;
@@ -3391,7 +3443,25 @@
     return state.structures.filter((st) => st.type === "wall");
   }
 
-  function resolveWallCollision(entity, radius) {
+  function resolveTreeCollision(entity, radius) {
+    for (const island of state.islands) {
+      if (dist(entity, island) > island.r + 80) continue;
+      for (const tree of island.trees) {
+        if (tree.dead) continue;
+        const gap = Math.hypot(entity.x - tree.x, entity.y - tree.y);
+        const min = radius + TREE_COLLISION_RADIUS;
+        if (gap > 0 && gap < min) {
+          const push = min - gap;
+          entity.x += ((entity.x - tree.x) / gap) * push;
+          entity.y += ((entity.y - tree.y) / gap) * push;
+        } else if (gap === 0) {
+          entity.x += min;
+        }
+      }
+    }
+  }
+
+  function resolveWallCollision(entity, radius, includeTrees = false) {
     for (const wall of solidWalls()) {
       const f = footprint("wall");
       const cos = Math.cos(-(wall.angle || 0));
@@ -3426,6 +3496,7 @@
         entity.y += wy * (Math.min(pushX, pushY) + radius);
       }
     }
+    if (includeTrees) resolveTreeCollision(entity, radius);
   }
 
   function hitsWall(p, radius) {
@@ -3659,8 +3730,12 @@
 
   function updateHud() {
     const p = state.player;
-    renderHotbar();
-    renderRecipes();
+    const t = now();
+    if (t - lastHudRender > 0.35) {
+      lastHudRender = t;
+      renderHotbar();
+      renderRecipes();
+    }
     setMeter("health", p.health);
     setMeter("hunger", p.hunger);
     setMeter("thirst", p.thirst);
@@ -4044,8 +4119,13 @@
           ctx.restore();
           continue;
         }
-        if (d.type === "scrap") {
-          drawScrapModel(0, 0, 1);
+        if (d.type === "scrap" || d.type === "iron" || d.type === "steel") {
+          const colors = {
+            scrap: ["#879aa1", "#c9d8dc"],
+            iron: ["#b4bdc2", "#eef4f5"],
+            steel: ["#6f858e", "#e8fbff"]
+          }[d.type];
+          drawScrapModel(0, 0, 1, colors[0], colors[1]);
           ctx.restore();
           continue;
         }
@@ -4058,6 +4138,8 @@
           wood: "#b87942",
           leaves: "#64b957",
           scrap: "#a9c3c8",
+          iron: "#d6dde0",
+          steel: "#e7f3f5",
           cloth: "#e4e1cf",
           rope: "#d0ad62",
           glass: "#9ae9ff"

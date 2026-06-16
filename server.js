@@ -111,6 +111,42 @@ function distance(a, b) {
   return Math.hypot(a.x - b.x, a.y - b.y);
 }
 
+function shortAngle(a) {
+  return Math.atan2(Math.sin(a), Math.cos(a));
+}
+
+function steerServerSharkAroundIslands(shark, desiredAngle) {
+  let angle = desiredAngle;
+  for (const island of SERVER_ISLANDS) {
+    const d = distance(shark, island);
+    const look = {
+      x: shark.x + Math.cos(angle) * 150,
+      y: shark.y + Math.sin(angle) * 150
+    };
+    const aboutToHit = distance(look, island) < island.r + 105;
+    if (d > island.r + 250 && !aboutToHit) continue;
+    const away = Math.atan2(shark.y - island.y, shark.x - island.x);
+    const side = shortAngle(angle - away) >= 0 ? 1 : -1;
+    const tangent = away + side * Math.PI / 2;
+    const target = d < island.r + 86 ? away : tangent;
+    angle += shortAngle(target - angle) * (aboutToHit ? 0.82 : 0.4);
+  }
+  return angle;
+}
+
+function keepServerSharkOffLand(shark) {
+  for (const island of SERVER_ISLANDS) {
+    const d = distance(shark, island);
+    const min = island.r + 58;
+    if (d > 0 && d < min) {
+      const a = Math.atan2(shark.y - island.y, shark.x - island.x);
+      shark.x = island.x + Math.cos(a) * min;
+      shark.y = island.y + Math.sin(a) * min;
+      shark.facing += shortAngle(a - shark.facing) * 0.7;
+    }
+  }
+}
+
 function cleanSlot(item) {
   if (!item || typeof item !== "object") return null;
   const id = String(item.id || "").slice(0, 32);
@@ -205,7 +241,8 @@ function isSpawnClear(point) {
   return true;
 }
 
-function chooseSpawnPoint() {
+function chooseSpawnPoint(preferred = null) {
+  if (preferred && isSpawnClear(preferred)) return preferred;
   for (const point of SPAWN_POINTS) {
     if (isSpawnClear(point)) return point;
   }
@@ -523,7 +560,7 @@ function tickServerSharks() {
   const now = Date.now();
   const dt = Math.min(0.5, Math.max(0.016, (now - lastSharkTick) / 1000));
   lastSharkTick = now;
-  const targets = activePlayers().filter((player) => player.health > 0 && !player.onIsland);
+  const targets = activePlayers().filter((player) => player.health > 0 && !player.onIsland && (!player.spawnedAt || now - player.spawnedAt > 5000));
   for (const shark of serverSharks) {
     let target = null;
     let best = Infinity;
@@ -536,9 +573,11 @@ function tickServerSharks() {
     }
     if (target) {
       shark.targetId = target.id;
-      shark.facing = Math.atan2(target.y - shark.y, target.x - shark.x);
-      shark.x = clamp(shark.x + Math.cos(shark.facing) * SERVER_SHARK_SPEED * dt, 80, WORLD - 80);
-      shark.y = clamp(shark.y + Math.sin(shark.facing) * SERVER_SHARK_SPEED * dt, 80, WORLD - 80);
+      const desired = steerServerSharkAroundIslands(shark, Math.atan2(target.y - shark.y, target.x - shark.x));
+      shark.facing += shortAngle(desired - shark.facing) * Math.min(1, dt * 3.2);
+      const speed = best < 48 && now < shark.biteAt ? SERVER_SHARK_SPEED * 0.35 : SERVER_SHARK_SPEED;
+      shark.x = clamp(shark.x + Math.cos(shark.facing) * speed * dt, 80, WORLD - 80);
+      shark.y = clamp(shark.y + Math.sin(shark.facing) * speed * dt, 80, WORLD - 80);
       if (best < 46 && now >= shark.biteAt) {
         const player = players.get(target.id);
         if (player) player.health = clamp((player.health || 100) - SERVER_SHARK_DAMAGE, 0, 100);
@@ -546,10 +585,12 @@ function tickServerSharks() {
       }
     } else {
       shark.targetId = null;
-      shark.facing += (Math.random() - 0.5) * 0.35;
+      if (Math.random() < dt * 0.35) shark.facing += (Math.random() - 0.5) * 0.35;
+      shark.facing = steerServerSharkAroundIslands(shark, shark.facing);
       shark.x = clamp(shark.x + Math.cos(shark.facing) * 34 * dt, 80, WORLD - 80);
       shark.y = clamp(shark.y + Math.sin(shark.facing) * 34 * dt, 80, WORLD - 80);
     }
+    keepServerSharkOffLand(shark);
   }
 }
 
@@ -577,7 +618,8 @@ const server = http.createServer(async (req, res) => {
     const body = await readBody(req);
     const id = crypto.randomUUID();
     const player = playerFromBody(id, body);
-    shiftWorldToSpawn(player.world, player, chooseSpawnPoint());
+    const preferred = player.world ? raftCenter(player.world) : { x: player.x, y: player.y };
+    shiftWorldToSpawn(player.world, player, chooseSpawnPoint(preferred));
     players.set(id, player);
     tickServerWorlds();
     tickServerSharks();
@@ -587,7 +629,10 @@ const server = http.createServer(async (req, res) => {
   if (req.method === "POST" && req.url === "/api/state") {
     const body = await readBody(req);
     const id = String(body.id || crypto.randomUUID());
-    players.set(id, playerFromBody(id, body, players.get(id)));
+    const existing = players.get(id);
+    const player = playerFromBody(id, body, existing);
+    if (!existing && !player.spawnedAt) player.spawnedAt = Date.now();
+    players.set(id, player);
     applyRaftCommands(body.raftCommands);
     applyWorldCommands(body.worldCommands);
     applyProjectileCommands(body.projectileCommands);
