@@ -31,6 +31,23 @@
   const TILE = 72;
   const WORLD = 9600;
   const STRUCTURE_RADIUS = 21;
+  const SPAWN_CLEARANCE = 520;
+  const SPAWN_POINTS = [
+    { x: 520, y: 520 },
+    { x: 9080, y: 520 },
+    { x: 520, y: 9080 },
+    { x: 9080, y: 9080 },
+    { x: 4800, y: 520 },
+    { x: 520, y: 4800 },
+    { x: 9080, y: 4800 },
+    { x: 4800, y: 9080 },
+    { x: 2500, y: 470 },
+    { x: 7100, y: 470 },
+    { x: 470, y: 2500 },
+    { x: 9130, y: 2500 },
+    { x: 2500, y: 9130 },
+    { x: 7100, y: 9130 }
+  ];
   const PLACEMENT_FOOTPRINT_SCALE = 0.25;
   const ISLAND_WALK_SCALE = 1;
   const SHIPWRECK_SCALE = 2;
@@ -155,6 +172,7 @@
   let playerName = "Captain";
   let devMode = false;
   let serverPlayerId = null;
+  let serverSpawnStamp = 0;
   let serverSyncTimer = 0;
   let scoreboardRows = [];
   let remotePlayers = [];
@@ -167,6 +185,7 @@
   let dragSlotRef = null;
   let serverSyncInFlight = false;
   let nextServerObjectId = 1;
+  let localSpawnApplied = false;
   let pendingRemoteRaftMoves = new Map();
   let pendingPlayerHits = [];
   let pendingWorldCommands = [];
@@ -546,6 +565,9 @@
     openChest = null;
     if (inventoryEl) inventoryEl.hidden = true;
     serverSyncInFlight = false;
+    serverPlayerId = null;
+    serverSpawnStamp = 0;
+    localSpawnApplied = false;
     localPeers.clear();
     serverAggressiveSharks = [];
     remoteWorlds.clear();
@@ -1405,8 +1427,73 @@
   function joinLocalMultiplayer() {
     usingLocalMultiplayer = true;
     ensureLocalChannel();
+    readLocalStoragePeers();
+    applyLocalFallbackSpawn();
     publishLocalPeer("state");
     updateLocalMultiplayer(true);
+  }
+
+  function applyLocalFallbackSpawn() {
+    if (localSpawnApplied) return;
+    const spawn = chooseLocalSpawnPoint();
+    shiftLocalWorldToSpawn(spawn);
+    localSpawnApplied = true;
+  }
+
+  function chooseLocalSpawnPoint() {
+    for (const point of SPAWN_POINTS) {
+      if (localSpawnClear(point)) return point;
+    }
+    for (let i = 0; i < 80; i++) {
+      const point = { x: rnd(420, WORLD - 420), y: rnd(420, WORLD - 420) };
+      if (localSpawnClear(point)) return point;
+    }
+    return randomOceanPoint(0, null, state.islands);
+  }
+
+  function localSpawnClear(point) {
+    if (state.islands.some((island) => Math.hypot(point.x - island.x, point.y - island.y) < island.r + 260)) return false;
+    for (const peer of localPeers.values()) {
+      if (Math.hypot(point.x - peer.x, point.y - peer.y) < SPAWN_CLEARANCE) return false;
+      if (peer.world?.raftOffset && Math.hypot(point.x - remoteWorldCenter(peer.world).x, point.y - remoteWorldCenter(peer.world).y) < SPAWN_CLEARANCE) return false;
+    }
+    return true;
+  }
+
+  function remoteWorldCenter(world) {
+    const raft = world?.raft || [];
+    if (!raft.length || !world?.raftOffset) return { x: world?.raftOffset?.x || 0, y: world?.raftOffset?.y || 0 };
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    for (const rt of raft) {
+      const x = (world.raftOffset.x || 0) + (rt.gx || 0) * TILE;
+      const y = (world.raftOffset.y || 0) + (rt.gy || 0) * TILE;
+      minX = Math.min(minX, x);
+      minY = Math.min(minY, y);
+      maxX = Math.max(maxX, x + TILE);
+      maxY = Math.max(maxY, y + TILE);
+    }
+    return { x: (minX + maxX) / 2, y: (minY + maxY) / 2 };
+  }
+
+  function shiftLocalWorldToSpawn(spawn) {
+    const center = remoteWorldCenter({ raftOffset: state.raftOffset, raft: state.raft });
+    const dx = spawn.x - center.x;
+    const dy = spawn.y - center.y;
+    state.player.x = clamp(state.player.x + dx, 80, WORLD - 80);
+    state.player.y = clamp(state.player.y + dy, 80, WORLD - 80);
+    state.camera.x = state.player.x;
+    state.camera.y = state.player.y;
+    state.raftOffset.x += dx;
+    state.raftOffset.y += dy;
+    for (const st of state.structures) {
+      if (st.base === "raft") {
+        st.x += dx;
+        st.y += dy;
+      }
+    }
   }
 
   function ensureLocalChannel() {
@@ -1591,7 +1678,16 @@
   }
 
   function applyServerPlayerState(serverPlayer) {
-    if (!serverPlayer || devMode || !state.player.alive) return;
+    if (!serverPlayer || !state.player.alive) return;
+    const spawnedAt = cleanCoord(serverPlayer.spawnedAt, 0);
+    if (spawnedAt && spawnedAt !== serverSpawnStamp) {
+      serverSpawnStamp = spawnedAt;
+      state.player.x = clamp(cleanCoord(serverPlayer.x, state.player.x), 80, WORLD - 80);
+      state.player.y = clamp(cleanCoord(serverPlayer.y, state.player.y), 80, WORLD - 80);
+      state.camera.x = state.player.x;
+      state.camera.y = state.player.y;
+    }
+    if (devMode) return;
     const serverHealth = clamp(cleanCoord(serverPlayer.health, state.player.health), 0, 100);
     if (serverHealth >= state.player.health) return;
     state.player.health = serverHealth;
@@ -4500,13 +4596,13 @@
     const jab = swingCurve("spear") * 26;
     ctx.save();
     ctx.translate(jab, 0);
-    ctx.strokeStyle = style.color;
+    ctx.strokeStyle = style.metal ? style.color : "#8b5b35";
     ctx.lineWidth = style.metal ? 5 : 4;
     ctx.beginPath();
     ctx.moveTo(8, -8);
     ctx.lineTo(style.metal ? 66 : 58, -8);
     ctx.stroke();
-    ctx.fillStyle = style.metal ? "#e7eef0" : "#b7ccd0";
+    ctx.fillStyle = style.metal ? "#e7eef0" : "#8b5b35";
     ctx.beginPath();
     ctx.moveTo(style.metal ? 78 : 68, -8);
     ctx.lineTo(style.metal ? 62 : 55, style.metal ? -17 : -15);
@@ -4528,10 +4624,10 @@
     ctx.moveTo(-4, 8);
     ctx.lineTo(39, -8);
     ctx.stroke();
-    ctx.fillStyle = style.metal ? style.color : "#c3d1d6";
+    ctx.fillStyle = style.metal ? style.color : "#9b6a35";
     roundRect(32, -20, style.metal ? 20 : 16, 21, 4);
     ctx.fill();
-    ctx.fillStyle = style.metal ? "#eef7f9" : "#eef6f8";
+    ctx.fillStyle = style.metal ? "#eef7f9" : "#c78a4a";
     ctx.beginPath();
     ctx.moveTo(style.metal ? 50 : 47, style.metal ? -22 : -19);
     ctx.lineTo(style.metal ? 64 : 58, -11);
@@ -4553,10 +4649,10 @@
     ctx.moveTo(-3, -6);
     ctx.lineTo(38, 9);
     ctx.stroke();
-    ctx.fillStyle = style.metal ? style.color : "#9aaab0";
+    ctx.fillStyle = style.metal ? style.color : "#8b5b35";
     roundRect(32, -1, style.metal ? 30 : 24, style.metal ? 16 : 14, 4);
     ctx.fill();
-    ctx.fillStyle = "#cad5d8";
+    ctx.fillStyle = style.metal ? "#cad5d8" : "#b87942";
     ctx.fillRect(38, 1, 5, style.metal ? 13 : 12);
     ctx.restore();
   }

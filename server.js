@@ -7,6 +7,41 @@ const root = __dirname;
 const port = Number(process.env.PORT || 4173);
 const host = process.env.HOST || "0.0.0.0";
 const WORLD = 9600;
+const TILE = 72;
+const SPAWN_CLEARANCE = 520;
+const SERVER_ISLANDS = [
+  { x: 1200, y: 1100, r: 215 },
+  { x: 3000, y: 950, r: 260 },
+  { x: 5200, y: 1200, r: 285 },
+  { x: 8200, y: 1050, r: 330 },
+  { x: 1500, y: 3000, r: 300 },
+  { x: 4000, y: 3300, r: 430 },
+  { x: 6500, y: 3100, r: 245 },
+  { x: 8700, y: 3500, r: 275 },
+  { x: 1150, y: 5500, r: 260 },
+  { x: 3300, y: 5900, r: 225 },
+  { x: 6000, y: 5600, r: 380 },
+  { x: 8500, y: 5900, r: 230 },
+  { x: 1700, y: 8250, r: 315 },
+  { x: 4700, y: 8100, r: 260 },
+  { x: 7800, y: 8350, r: 390 }
+];
+const SPAWN_POINTS = [
+  { x: 520, y: 520 },
+  { x: 9080, y: 520 },
+  { x: 520, y: 9080 },
+  { x: 9080, y: 9080 },
+  { x: 4800, y: 520 },
+  { x: 520, y: 4800 },
+  { x: 9080, y: 4800 },
+  { x: 4800, y: 9080 },
+  { x: 2500, y: 470 },
+  { x: 7100, y: 470 },
+  { x: 470, y: 2500 },
+  { x: 9130, y: 2500 },
+  { x: 2500, y: 9130 },
+  { x: 7100, y: 9130 }
+];
 const SERVER_AGGRESSIVE_SHARKS = 2;
 const SERVER_SHARK_SPEED = 115;
 const SERVER_SHARK_DAMAGE = 36;
@@ -134,6 +169,71 @@ function serverTileRect(world, tile) {
 function structureOnTile(world, st, tile) {
   const r = serverTileRect(world, tile);
   return st.x > r.x && st.x < r.x + r.w && st.y > r.y && st.y < r.y + r.h;
+}
+
+function raftBounds(world) {
+  const tiles = world?.raft || [];
+  if (!tiles.length || !world?.raftOffset) {
+    return { minX: world?.raftOffset?.x || 0, minY: world?.raftOffset?.y || 0, maxX: world?.raftOffset?.x || 0, maxY: world?.raftOffset?.y || 0 };
+  }
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const tile of tiles) {
+    const r = serverTileRect(world, tile);
+    minX = Math.min(minX, r.x);
+    minY = Math.min(minY, r.y);
+    maxX = Math.max(maxX, r.x + r.w);
+    maxY = Math.max(maxY, r.y + r.h);
+  }
+  return { minX, minY, maxX, maxY };
+}
+
+function raftCenter(world) {
+  const b = raftBounds(world);
+  return { x: (b.minX + b.maxX) / 2, y: (b.minY + b.maxY) / 2 };
+}
+
+function isSpawnClear(point) {
+  if (SERVER_ISLANDS.some((island) => Math.hypot(point.x - island.x, point.y - island.y) < island.r + 260)) return false;
+  for (const player of activePlayers()) {
+    if (Math.hypot(point.x - player.x, point.y - player.y) < SPAWN_CLEARANCE) return false;
+    const stored = players.get(player.id);
+    if (stored?.world && Math.hypot(point.x - raftCenter(stored.world).x, point.y - raftCenter(stored.world).y) < SPAWN_CLEARANCE) return false;
+  }
+  return true;
+}
+
+function chooseSpawnPoint() {
+  for (const point of SPAWN_POINTS) {
+    if (isSpawnClear(point)) return point;
+  }
+  for (let i = 0; i < 100; i++) {
+    const point = { x: 420 + Math.random() * (WORLD - 840), y: 420 + Math.random() * (WORLD - 840) };
+    if (isSpawnClear(point)) return point;
+  }
+  return { x: 520 + Math.random() * 600, y: 520 + Math.random() * 600 };
+}
+
+function shiftWorldToSpawn(world, player, spawn) {
+  if (!world || !world.raftOffset) return;
+  const center = raftCenter(world);
+  const dx = spawn.x - center.x;
+  const dy = spawn.y - center.y;
+  world.raftOffset.x = clamp(world.raftOffset.x + dx, 0, WORLD);
+  world.raftOffset.y = clamp(world.raftOffset.y + dy, 0, WORLD);
+  for (const st of world.structures || []) {
+    st.x = clamp(st.x + dx, 0, WORLD);
+    st.y = clamp(st.y + dy, 0, WORLD);
+  }
+  player.x = clamp(player.x + dx, 80, WORLD - 80);
+  player.y = clamp(player.y + dy, 80, WORLD - 80);
+  if (!world.raft?.length) {
+    world.raftOffset.x = spawn.x - TILE / 2;
+    world.raftOffset.y = spawn.y - TILE / 2;
+  }
+  player.spawnedAt = Date.now();
 }
 
 function sanitizeWorld(world) {
@@ -400,6 +500,7 @@ function playerFromBody(id, body, existing = {}) {
     x: cleanNumber(body.x, existing.x || 4800),
     y: cleanNumber(body.y, existing.y || 4800),
     facing: cleanNumber(body.facing, existing.facing || 0),
+    spawnedAt: existing.spawnedAt || cleanNumber(body.spawnedAt, 0),
     seen: Date.now()
   };
 }
@@ -409,7 +510,7 @@ function activePlayers() {
   for (const [id, player] of players) {
     if (now - player.seen > 15_000) players.delete(id);
   }
-  return [...players.values()].map(({ id, name, level, xp, health, stamina, onIsland, onRaft, selectedItem, x, y, facing }) => ({ id, name, level, xp, health, stamina, onIsland, onRaft, selectedItem, x, y, facing }));
+  return [...players.values()].map(({ id, name, level, xp, health, stamina, onIsland, onRaft, selectedItem, x, y, facing, spawnedAt }) => ({ id, name, level, xp, health, stamina, onIsland, onRaft, selectedItem, x, y, facing, spawnedAt }));
 }
 
 function scoreboard() {
@@ -475,7 +576,9 @@ const server = http.createServer(async (req, res) => {
   if (req.method === "POST" && req.url === "/api/join") {
     const body = await readBody(req);
     const id = crypto.randomUUID();
-    players.set(id, playerFromBody(id, body));
+    const player = playerFromBody(id, body);
+    shiftWorldToSpawn(player.world, player, chooseSpawnPoint());
+    players.set(id, player);
     tickServerWorlds();
     tickServerSharks();
     return sendJson(res, { id, scoreboard: scoreboard(), players: activePlayers(), serverSharks: serverSharkState(), serverProjectiles: serverProjectileState(), worlds: activeWorlds() });
