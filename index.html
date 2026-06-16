@@ -73,7 +73,7 @@
       <div id="prompt"></div>
 
       <section id="help">
-        <b>WASD</b> move · <b>A/D</b> aim cannon · <b>Shift</b> sprint · <b>Mouse</b> aim/use · <b>F</b> pickup/interact · <b>C</b> recipes · <b>N</b> build item · <b>G</b> food · <b>Z</b> speed · <b>X</b> agility · <b>V</b> strength · <b>R</b> rotate
+        <b>WASD</b> move · <b>A/D</b> aim cannon · <b>Shift</b> sprint · <b>Mouse</b> aim/use · <b>F</b> pickup/interact · <b>I</b> inventory · <b>C</b> recipes · <b>N</b> build item · <b>G</b> food · <b>Z</b> speed · <b>X</b> agility · <b>V</b> strength · <b>R</b> rotate
       </section>
 
       <section id="recipe-book" hidden>
@@ -82,6 +82,27 @@
           <button id="recipe-book-close" type="button">Close</button>
         </div>
         <div id="recipe-grid"></div>
+      </section>
+
+      <section id="inventory" hidden>
+        <div class="popup-head">
+          <h2 id="inventory-title">Inventory</h2>
+          <button id="inventory-close" type="button">Close</button>
+        </div>
+        <div class="inventory-layout">
+          <div class="inventory-pane">
+            <h3>Backpack</h3>
+            <div id="inventory-items" class="inventory-grid"></div>
+          </div>
+          <div class="inventory-pane">
+            <h3>Hotbar</h3>
+            <div id="inventory-hotbar" class="inventory-grid compact"></div>
+          </div>
+          <div id="chest-pane" class="inventory-pane" hidden>
+            <h3>Chest</h3>
+            <div id="chest-items" class="inventory-grid"></div>
+          </div>
+        </div>
       </section>
 
       <section id="start-screen">

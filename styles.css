@@ -433,7 +433,8 @@ h1 {
   color: #e8fbff;
 }
 
-#recipe-book {
+#recipe-book,
+#inventory {
   position: absolute;
   left: 50%;
   top: 50%;
@@ -455,7 +456,13 @@ h1 {
   transform: translateY(-50%);
 }
 
-#recipe-book[hidden] {
+#inventory {
+  left: 50%;
+  width: min(1040px, calc(100vw - 32px));
+}
+
+#recipe-book[hidden],
+#inventory[hidden] {
   display: none;
 }
 
@@ -512,6 +519,114 @@ h1 {
   font-size: 11px;
   font-weight: 750;
   line-height: 1.35;
+}
+
+.inventory-layout {
+  display: grid;
+  grid-template-columns: minmax(300px, 1fr) minmax(260px, 0.85fr) minmax(420px, 1.2fr);
+  gap: 10px;
+}
+
+.inventory-pane {
+  min-height: 188px;
+  padding: 10px;
+  border: 1px solid rgba(214, 244, 249, 0.14);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.inventory-pane[hidden] {
+  display: none;
+}
+
+.inventory-pane h3 {
+  margin: 0 0 8px;
+  color: #dff5fb;
+  font-size: 12px;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.inventory-grid {
+  display: grid;
+  gap: 5px;
+  overflow: auto;
+  max-height: min(410px, calc(100vh - 220px));
+}
+
+#inventory-items {
+  grid-template-columns: repeat(5, 54px);
+}
+
+#inventory-hotbar {
+  grid-template-columns: repeat(5, 54px);
+}
+
+#chest-items {
+  grid-template-columns: repeat(8, 54px);
+}
+
+.item-card {
+  position: relative;
+  min-height: 54px;
+  padding: 15px 5px 5px;
+  border: 1px solid rgba(214, 244, 249, 0.15);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--ink);
+  text-align: left;
+}
+
+.item-card.slot-cell {
+  width: 54px;
+  height: 54px;
+  text-align: center;
+}
+
+.item-card.slot-cell.filled {
+  background: rgba(54, 214, 199, 0.1);
+}
+
+.item-card.slot-cell.locked {
+  opacity: 0.5;
+}
+
+.item-card.actionable {
+  cursor: pointer;
+}
+
+.item-card.actionable:hover {
+  border-color: rgba(54, 214, 199, 0.65);
+  background: rgba(54, 214, 199, 0.14);
+}
+
+.item-card b,
+.item-card span {
+  display: block;
+}
+
+.item-card b {
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.item-card span {
+  position: absolute;
+  right: 4px;
+  bottom: 3px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.item-card kbd {
+  position: absolute;
+  top: 3px;
+  left: 4px;
+  color: var(--muted);
+  font: 800 9px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
 #start-screen,
@@ -638,5 +753,18 @@ h1 {
 
   .slot {
     height: 48px;
+  }
+
+  #inventory {
+    width: calc(100vw - 24px);
+    max-height: calc(100vh - 92px);
+  }
+
+  .inventory-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .inventory-grid {
+    max-height: 180px;
   }
 }

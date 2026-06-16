@@ -12,6 +12,13 @@
   const recipeGridEl = document.getElementById("recipe-grid");
   const recipeBookOpenEl = document.getElementById("recipe-book-open");
   const recipeBookCloseEl = document.getElementById("recipe-book-close");
+  const inventoryEl = document.getElementById("inventory");
+  const inventoryTitleEl = document.getElementById("inventory-title");
+  const inventoryCloseEl = document.getElementById("inventory-close");
+  const inventoryItemsEl = document.getElementById("inventory-items");
+  const inventoryHotbarEl = document.getElementById("inventory-hotbar");
+  const chestPaneEl = document.getElementById("chest-pane");
+  const chestItemsEl = document.getElementById("chest-items");
   const scoreboardListEl = document.getElementById("scoreboard-list");
   const startScreenEl = document.getElementById("start-screen");
   const usernameEl = document.getElementById("username");
@@ -21,8 +28,14 @@
 
   const TAU = Math.PI * 2;
   const TILE = 72;
-  const WORLD = 7200;
+  const WORLD = 9600;
   const STRUCTURE_RADIUS = 21;
+  const PLACEMENT_FOOTPRINT_SCALE = 0.25;
+  const ISLAND_WALK_SCALE = 1;
+  const SHIPWRECK_SCALE = 2;
+  const SHIPWRECK_INTERACT_RADIUS = 270;
+  const SHIPWRECK_CLEAR_RADIUS = 152;
+  const SERVER_API_ROOT = location.protocol === "file:" ? "http://127.0.0.1:4173" : "";
   const GRILL_TIME = 60;
   const WATER_TIME = 60;
   const TOMATO_GROW_TIME = 300;
@@ -30,7 +43,15 @@
   const SHARK_HP = 120;
   const SHARK_BITE_DAMAGE = 36;
   const SHARK_RAFT_DAMAGE = 30;
+  const SHARK_AGGRESSION_CHANCE = 0.2;
   const CROCODILE_DAMAGE = 27;
+  const PLAYER_INV_CAP = 20;
+  const CHEST_INV_CAP = 40;
+  const DEV_TOKEN = "GoldDigger";
+  const DEV_RESOURCE_AMOUNT = 9999;
+  const FOOD_ITEMS = ["cookedFish", "cookedMeat", "rawFish", "tomato", "coconut"];
+  const TOOL_ITEMS = ["rod", "oar", "axe", "spear", "hammer", "metalAxe", "metalSpear", "metalHammer", "musket"];
+  const HOTBAR_SWAP_SLOTS = Array.from({ length: 10 }, (_, i) => i);
   const rnd = (a, b) => a + Math.random() * (b - a);
   const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
   const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
@@ -47,7 +68,12 @@
     torch: { wood: 2, leaves: 2, cloth: 1 },
     cannon: { wood: 10, scrap: 8, rope: 2 },
     bandage: { cloth: 2, leaves: 3 },
-    spear: { wood: 6, scrap: 3, rope: 2 }
+    flask: { glass: 1, rope: 1 },
+    spear: { wood: 6, scrap: 3, rope: 2 },
+    metalAxe: { wood: 5, scrap: 9, rope: 2 },
+    metalSpear: { wood: 5, scrap: 11, rope: 3 },
+    metalHammer: { wood: 7, scrap: 10, cloth: 2 },
+    musket: { wood: 18, scrap: 26, rope: 6, cloth: 4, glass: 4 }
   };
 
   const blockHp = {
@@ -72,16 +98,16 @@
   };
 
   const hotbar = [
-    { id: "rod", name: "Rod", key: "1" },
-    { id: "oar", name: "Oar", key: "2" },
-    { id: "axe", name: "Axe", key: "3" },
-    { id: "spear", name: "Spear", key: "4" },
-    { id: "hammer", name: "Hammer", key: "5" },
-    { id: "bandage", name: "Bandage", key: "6" },
-    { id: "food", name: "Food", key: "7" },
-    { id: "glass", name: "Glass", key: "8" },
-    { id: "build", name: "Build", key: "9" },
-    { id: "empty", name: "-", key: "0" }
+    { id: "rod", name: "Rod", key: "1", qty: 1, swappable: true },
+    { id: "oar", name: "Oar", key: "2", qty: 1, swappable: true },
+    { id: "axe", name: "Axe", key: "3", qty: 1, swappable: true },
+    { id: "spear", name: "Spear", key: "4", qty: 1, swappable: true },
+    { id: "hammer", name: "Hammer", key: "5", qty: 1, swappable: true },
+    { id: "bandage", name: "Bandage", key: "6", qty: 1, swappable: true },
+    { id: "empty", name: "-", key: "7", swappable: true },
+    { id: "empty", name: "-", key: "8", swappable: true },
+    { id: "empty", name: "-", key: "9", swappable: true },
+    { id: "empty", name: "-", key: "0", swappable: true }
   ];
 
   let keys = new Set();
@@ -95,18 +121,28 @@
   let heldItem = null;
   let selectedFood = null;
   let toolAnim = { kind: null, t: 0, duration: 0 };
-  let pendingBuild = { raft: 1 };
+  let pendingBuild = {};
   let dayClock = 0;
   let cast = null;
   let rowingTimer = 0;
   let waveTime = 0;
   let gameStarted = false;
   let playerName = "Captain";
+  let devMode = false;
   let serverPlayerId = null;
   let serverSyncTimer = 0;
   let scoreboardRows = [];
   let remotePlayers = [];
+  let serverAggressiveSharks = [];
   let activeCannon = null;
+  let musketCooldown = 0;
+  let openChest = null;
+  let dragSlotRef = null;
+  let serverSyncInFlight = false;
+  let localChannel = null;
+  let usingLocalMultiplayer = false;
+  let localPeerId = `local-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const localPeers = new Map();
 
   const state = createWorld();
 
@@ -149,6 +185,7 @@
       animalRespawns: [],
       projectiles: [],
       particles: [],
+      inventory: startingInventorySlots(),
       resources: {
         wood: 12,
         leaves: 8,
@@ -163,7 +200,7 @@
         cookedMeat: 0,
         coconut: 0,
         tomato: 0,
-        bandage: 1
+        bandage: 0
       },
       camera: { x: player.x, y: player.y },
       raftOffset: { x: player.x - TILE * 0.5, y: player.y - TILE * 0.5 },
@@ -174,11 +211,38 @@
     };
   }
 
+  function emptySlots(count) {
+    return Array.from({ length: count }, () => null);
+  }
+
+  function slot(id, qty = 1) {
+    return id && qty > 0 ? { id, qty } : null;
+  }
+
+  function startingInventorySlots() {
+    const slots = emptySlots(PLAYER_INV_CAP);
+    slots[0] = slot("raft", 1);
+    return slots;
+  }
+
+  function resetHotbarItems() {
+    setHotbarItem(0, slot("rod", 1));
+    setHotbarItem(1, slot("oar", 1));
+    setHotbarItem(2, slot("axe", 1));
+    setHotbarItem(3, slot("spear", 1));
+    setHotbarItem(4, slot("hammer", 1));
+    setHotbarItem(5, slot("bandage", 1));
+    setHotbarItem(6, null);
+    setHotbarItem(7, slot("flask", 1));
+    setHotbarItem(8, null);
+    setHotbarItem(9, null);
+  }
+
   function createSharks(player, islands = null) {
-    return Array.from({ length: 14 }, () => {
+    return Array.from({ length: 21 }, () => {
       const p = randomOceanPoint(520, player, islands);
       const a = rnd(0, TAU);
-      const aggressive = Math.random() < 0.25;
+      const aggressive = Math.random() < SHARK_AGGRESSION_CHANCE;
       return {
         x: p.x,
         y: p.y,
@@ -209,23 +273,23 @@
   }
 
   function seedWorld() {
-    for (let i = 0; i < 175; i++) spawnDebris();
+    for (let i = 0; i < 240; i++) spawnDebris();
     const specs = [
-      { x: 980, y: 980, r: 215, kind: "small" },
-      { x: 2220, y: 860, r: 260, kind: "medium", wreck: true },
-      { x: 4020, y: 930, r: 285, kind: "medium" },
-      { x: 5900, y: 850, r: 330, kind: "large", wreck: true },
-      { x: 1160, y: 2360, r: 300, kind: "medium" },
-      { x: 2860, y: 2460, r: 430, kind: "large", wreck: true },
-      { x: 4460, y: 2500, r: 245, kind: "small" },
-      { x: 6200, y: 2720, r: 275, kind: "medium" },
-      { x: 1020, y: 4150, r: 260, kind: "medium" },
-      { x: 2660, y: 4320, r: 225, kind: "small" },
-      { x: 4240, y: 4160, r: 380, kind: "large", wreck: true },
-      { x: 5830, y: 4480, r: 230, kind: "small" },
-      { x: 1260, y: 6160, r: 315, kind: "medium", wreck: true },
-      { x: 3320, y: 6120, r: 260, kind: "medium" },
-      { x: 5480, y: 6260, r: 390, kind: "large" }
+      { x: 1200, y: 1100, r: 215, kind: "small" },
+      { x: 3000, y: 950, r: 260, kind: "medium", wreck: true },
+      { x: 5200, y: 1200, r: 285, kind: "medium" },
+      { x: 8200, y: 1050, r: 330, kind: "large", wreck: true },
+      { x: 1500, y: 3000, r: 300, kind: "medium" },
+      { x: 4000, y: 3300, r: 430, kind: "large", wreck: true },
+      { x: 6500, y: 3100, r: 245, kind: "small" },
+      { x: 8700, y: 3500, r: 275, kind: "medium" },
+      { x: 1150, y: 5500, r: 260, kind: "medium" },
+      { x: 3300, y: 5900, r: 225, kind: "small" },
+      { x: 6000, y: 5600, r: 380, kind: "large", wreck: true },
+      { x: 8500, y: 5900, r: 230, kind: "small" },
+      { x: 1700, y: 8250, r: 315, kind: "medium", wreck: true },
+      { x: 4700, y: 8100, r: 260, kind: "medium" },
+      { x: 7800, y: 8350, r: 390, kind: "large" }
     ];
     specs.forEach(addIsland);
   }
@@ -279,8 +343,8 @@
     island.shipwreck = { ...p, angle, loot: [] };
     for (let i = 0; i < 7; i++) {
       island.shipwreck.loot.push({
-        x: p.x + Math.cos(angle + Math.PI / 2) * rnd(-45, 45) + Math.cos(angle) * rnd(-60, 35),
-        y: p.y + Math.sin(angle + Math.PI / 2) * rnd(-45, 45) + Math.sin(angle) * rnd(-60, 35),
+        x: p.x + Math.cos(angle + Math.PI / 2) * rnd(-45, 45) * SHIPWRECK_SCALE + Math.cos(angle) * rnd(-60, 35) * SHIPWRECK_SCALE,
+        y: p.y + Math.sin(angle + Math.PI / 2) * rnd(-45, 45) * SHIPWRECK_SCALE + Math.sin(angle) * rnd(-60, 35) * SHIPWRECK_SCALE,
         type: Math.random() < 0.55 ? "scrap" : Math.random() < 0.78 ? "glass" : "rope",
         qty: 1,
         dead: false
@@ -314,6 +378,8 @@
 
   seedWorld();
   setSafeSpawn();
+  resetHotbarItems();
+  syncManagedCountsFromSlots();
   renderHotbar();
   renderRecipes();
   renderRecipeBook();
@@ -340,15 +406,14 @@
     const idx = ["Digit1", "Digit2", "Digit3", "Digit4", "Digit5", "Digit6", "Digit7", "Digit8", "Digit9", "Digit0"].indexOf(e.code);
     if (idx >= 0) {
       selected = idx;
-      buildMode = hotbar[selected].id === "build";
-      heldItem = hotbar[selected].id;
+      selectHotbarSlot(idx);
       renderHotbar();
     }
     if (e.code === "KeyB") {
       buildMode = !buildMode;
-      selected = 8;
+      heldItem = buildMode ? buildChoice : hotbar[selected]?.id || null;
       renderHotbar();
-      toast(buildMode ? "Build mode: use craft buttons to choose pieces." : "Build mode off.");
+      toast(buildMode ? `Build mode: ${label(buildChoice)} selected. N cycles recipes.` : "Build mode off.");
     }
     if (e.code === "KeyR") rotateBuild();
     if (e.code === "KeyN") cycleBuildChoice();
@@ -357,6 +422,7 @@
     if (e.code === "KeyX") train("agility");
     if (e.code === "KeyV") train("strength");
     if (e.code === "KeyC") toggleRecipeBook();
+    if (e.code === "KeyI") toggleInventory();
     if (e.code === "KeyF") interact();
     if (e.code === "Enter" && !gameStarted && !startScreenEl.hidden) startGame();
     else if (e.code === "Enter" && !state.player.alive) showStartScreen();
@@ -385,12 +451,16 @@
   recipeBookCloseEl.addEventListener("click", () => {
     recipeBookEl.hidden = true;
   });
+  inventoryCloseEl.addEventListener("click", () => closeInventory());
   usernameEl.addEventListener("keydown", (e) => {
     if (e.key === "Enter") startGame();
   });
+  window.addEventListener("beforeunload", () => publishLocalPeer("leave"));
 
   function startGame() {
-    playerName = cleanName(usernameEl.value);
+    const rawName = usernameEl.value.trim();
+    devMode = rawName === DEV_TOKEN;
+    playerName = cleanName(rawName);
     const fresh = createWorld();
     Object.keys(state).forEach((k) => delete state[k]);
     Object.assign(state, fresh);
@@ -403,13 +473,21 @@
     dayClock = 0;
     cast = null;
     rowingTimer = 0;
-    pendingBuild = { raft: 1 };
+    resetHotbarItems();
+    syncManagedCountsFromSlots();
+    if (devMode) applyDevToken();
     buildMode = false;
     buildAngle = 0;
     heldItem = null;
     selectedFood = null;
     toolAnim = { kind: null, t: 0, duration: 0 };
     activeCannon = null;
+    musketCooldown = 0;
+    openChest = null;
+    if (inventoryEl) inventoryEl.hidden = true;
+    serverSyncInFlight = false;
+    localPeers.clear();
+    serverAggressiveSharks = [];
     selected = 0;
     keys.clear();
     mouse.down = false;
@@ -420,7 +498,7 @@
     renderRecipes();
     renderRecipeBook();
     joinServerMode();
-    toast(`Welcome aboard, ${playerName}.`);
+    toast(devMode ? "Dev token accepted. GoldDigger mode active." : `Welcome aboard, ${playerName}.`);
   }
 
   function showStartScreen() {
@@ -435,75 +513,398 @@
     return value.trim().replace(/\s+/g, " ").slice(0, 18) || "Captain";
   }
 
+  function applyDevToken() {
+    state.player.health = 100;
+    state.player.hunger = 100;
+    state.player.thirst = 100;
+    for (const key of ["wood", "leaves", "scrap", "cloth", "rope", "glass", "sharkMeat", "meat"]) {
+      state.resources[key] = DEV_RESOURCE_AMOUNT;
+    }
+  }
+
   function renderHotbar() {
+    syncHotbarItems();
     hotbarEl.innerHTML = "";
     hotbar.forEach((item, i) => {
       const slot = document.createElement("div");
       slot.className = `slot ${i === selected ? "active" : ""}`;
-      const icon = {
+      const icon = itemIcon(item.id);
+      const count = hotbarCount(item);
+      slot.innerHTML = `<kbd>${item.key}</kbd>${count ? `<span class="count">${count}</span>` : ""}<div class="icon">${icon}</div><div class="name">${hotbarName(item)}</div>`;
+      slot.addEventListener("click", () => {
+        selected = i;
+        selectHotbarSlot(i);
+        renderHotbar();
+      });
+      hotbarEl.append(slot);
+    });
+    renderInventory();
+  }
+
+  function itemIcon(id) {
+    return {
         rod: "ROD",
         oar: "OAR",
         axe: "AXE",
         spear: "SPR",
         hammer: "HAM",
+        metalAxe: "MAX",
+        metalSpear: "MSP",
+        metalHammer: "MHM",
+        musket: "MSK",
         bandage: "BND",
-        food: "EAT",
-        glass: "H2O",
-        build: "BLD",
+        flask: "EFL",
+        waterFlask: "WFL",
+        cookedFish: "FIS",
+        cookedMeat: "MEAT",
+        rawFish: "RAW",
+        tomato: "TOM",
+        coconut: "COC",
+        raft: "RAFT",
+        grill: "GRL",
+        waterMaker: "H2O",
+        plantPot: "POT",
+        chest: "BOX",
+        wall: "WAL",
+        torch: "TOR",
+        cannon: "CAN",
         empty: ""
-      }[item.id];
-      const count = hotbarCount(item);
-      slot.innerHTML = `<kbd>${item.key}</kbd>${count ? `<span class="count">${count}</span>` : ""}<div class="icon">${icon}</div><div class="name">${hotbarName(item)}</div>`;
-      slot.addEventListener("click", () => {
-        selected = i;
-        buildMode = false;
-        heldItem = item.id;
-        renderHotbar();
-      });
-      hotbarEl.append(slot);
-    });
+      }[id] || label(id).slice(0, 3).toUpperCase();
+  }
+
+  function selectHotbarSlot(idx) {
+    const id = hotbar[idx]?.id || "empty";
+    if (isBuildRecipe(id)) {
+      buildChoice = id;
+      buildMode = true;
+      heldItem = id;
+    } else {
+      buildMode = false;
+      heldItem = id;
+      if (FOOD_ITEMS.includes(id)) selectedFood = id;
+    }
   }
 
   function hotbarName(item) {
-    if (item.id === "bandage") return `Bandage ${state.resources.bandage || 0}`;
-    if (item.id === "glass") return `Glass ${state.resources.glass || 0}`;
-    if (item.id === "food") return bestFoodLabel();
-    if (item.id === "build") return buildMode ? label(buildChoice) : "Build";
+    if (item.id === "empty") return "-";
+    if (item.id === "bandage") return `Bandage ${item.qty || 0}`;
+    if (item.id === "flask" || item.id === "waterFlask") return `${label(item.id)} ${item.qty || 0}`;
+    if (FOOD_ITEMS.includes(item.id)) return `${label(item.id)} ${item.qty || 0}`;
+    if (isBuildRecipe(item.id)) return `${label(item.id)} ${item.qty || 0}`;
     return item.name;
   }
 
   function hotbarCount(item) {
-    if (item.id === "bandage") return state.resources.bandage || "";
-    if (item.id === "glass") return state.resources.glass || "";
-    if (item.id === "food") {
-      const food = selectedFood || availableFoods()[0];
-      return food ? state.resources[food] || "" : "";
-    }
-    if (item.id === "build") return pendingBuild[buildChoice] || "";
+    if (item.id === "empty") return "";
+    if (item.id === "bandage") return item.qty || "";
+    if (item.id === "flask" || item.id === "waterFlask") return item.qty || "";
+    if (FOOD_ITEMS.includes(item.id)) return item.qty || "";
+    if (isBuildRecipe(item.id)) return item.qty || "";
+    if (isToolItem(item.id) && (item.qty || 0) > 1) return item.qty;
     return "";
   }
 
   function hotbarResource(id) {
-    return ["bandage", "glass"].includes(id);
-  }
-
-  function bestFoodLabel() {
-    const r = state.resources;
-    if (selectedFood && r[selectedFood] > 0) return `${label(selectedFood)} ${r[selectedFood]}`;
-    if (r.cookedFish > 0) return `Cooked Fish ${r.cookedFish}`;
-    if (r.cookedMeat > 0) return `Cooked Meat ${r.cookedMeat}`;
-    if (r.rawFish > 0) return `Raw Fish ${r.rawFish}`;
-    if (r.coconut > 0) return `Coconut ${r.coconut}`;
-    if (r.tomato > 0) return `Tomato ${r.tomato}`;
-    return "Food 0";
+    return ["bandage", "flask", "waterFlask"].includes(id);
   }
 
   function availableFoods() {
-    return ["cookedFish", "cookedMeat", "rawFish", "tomato", "coconut"].filter((key) => (state.resources[key] || 0) > 0);
+    return FOOD_ITEMS.filter((key) => (state.resources[key] || 0) > 0);
+  }
+
+  function managedItemCount(id) {
+    if (!id || id === "empty") return 0;
+    return countSlots(state.inventory, id) + countHotbarSlots(id);
+  }
+
+  function isToolItem(id) {
+    return TOOL_ITEMS.includes(id);
+  }
+
+  function isInventoryManaged(id) {
+    return id === "flask" || id === "waterFlask" || id === "bandage" || FOOD_ITEMS.includes(id) || isToolItem(id) || isBuildRecipe(id);
+  }
+
+  function inventorySlots() {
+    if (!Array.isArray(state.inventory)) state.inventory = emptySlots(PLAYER_INV_CAP);
+    while (state.inventory.length < PLAYER_INV_CAP) state.inventory.push(null);
+    if (state.inventory.length > PLAYER_INV_CAP) state.inventory.length = PLAYER_INV_CAP;
+    return state.inventory;
+  }
+
+  function chestSlots(chest) {
+    if (!chest) return emptySlots(CHEST_INV_CAP);
+    if (!Array.isArray(chest.storage)) {
+      const converted = emptySlots(CHEST_INV_CAP);
+      if (chest.storage && typeof chest.storage === "object") {
+        let i = 0;
+        for (const [id, qty] of Object.entries(chest.storage)) {
+          if (i >= CHEST_INV_CAP) break;
+          if (qty > 0) converted[i++] = slot(id, qty);
+        }
+      }
+      chest.storage = converted;
+    }
+    while (chest.storage.length < CHEST_INV_CAP) chest.storage.push(null);
+    if (chest.storage.length > CHEST_INV_CAP) chest.storage.length = CHEST_INV_CAP;
+    return chest.storage;
+  }
+
+  function normalizeSlot(item) {
+    return item && item.id && item.id !== "empty" && item.qty > 0 ? { id: item.id, qty: item.qty } : null;
+  }
+
+  function countSlots(slots, id) {
+    return (slots || []).reduce((sum, item) => sum + (item?.id === id ? item.qty || 0 : 0), 0);
+  }
+
+  function countHotbarSlots(id) {
+    return HOTBAR_SWAP_SLOTS.reduce((sum, idx) => sum + (hotbar[idx]?.id === id ? hotbar[idx].qty || 0 : 0), 0);
+  }
+
+  function usedInventorySlots(slots = inventorySlots()) {
+    return slots.filter(Boolean).length;
+  }
+
+  function playerHasInventorySpaceFor(id) {
+    return inventorySlots().some((item) => !item || item.id === id);
+  }
+
+  function playerHasItemSpaceFor(id) {
+    return playerHasInventorySpaceFor(id) || HOTBAR_SWAP_SLOTS.some((idx) => hotbar[idx].id === "empty" || hotbar[idx].id === id);
+  }
+
+  function syncHotbarItems() {
+    for (const idx of HOTBAR_SWAP_SLOTS) {
+      const item = hotbar[idx];
+      if (item.id !== "empty" && (!isInventoryManaged(item.id) || (item.qty || 0) <= 0)) setHotbarItem(idx, null);
+    }
+    const current = hotbar[selected]?.id;
+    if (buildMode) heldItem = buildChoice;
+    else if (current === "empty") heldItem = null;
+  }
+
+  function hotbarSwapTarget() {
+    if (HOTBAR_SWAP_SLOTS.includes(selected)) return selected;
+    return HOTBAR_SWAP_SLOTS.find((idx) => hotbar[idx].id === "empty") ?? HOTBAR_SWAP_SLOTS[0];
+  }
+
+  function putItemInHotbar(id, selectIt = false) {
+    if (!isInventoryManaged(id)) return false;
+    const existing = HOTBAR_SWAP_SLOTS.find((idx) => hotbar[idx].id === id);
+    const idx = existing ?? hotbarSwapTarget();
+    if (existing === undefined) {
+      const source = findSlotRefWithItem("inventory", id);
+      if (!source) return false;
+      moveSlot(source, { area: "hotbar", index: idx }, false);
+    }
+    if (selectIt) {
+      selected = idx;
+      selectHotbarSlot(idx);
+    }
+    renderHotbar();
+    return true;
+  }
+
+  function autoSlotItem(id) {
+    if (!isInventoryManaged(id)) return;
+    const idx = HOTBAR_SWAP_SLOTS.find((slotIndex) => hotbar[slotIndex].id === id);
+    if (idx !== undefined) syncManagedCountsFromSlots();
+  }
+
+  function toggleInventory(chest = null) {
+    if (!gameStarted) return;
+    if (inventoryEl.hidden) openInventory(chest);
+    else closeInventory();
+  }
+
+  function openInventory(chest = null) {
+    openChest = chest;
+    inventoryEl.hidden = false;
+    renderInventory();
+  }
+
+  function closeInventory() {
+    inventoryEl.hidden = true;
+    openChest = null;
+  }
+
+  function renderInventory() {
+    if (!inventoryEl || inventoryEl.hidden) return;
+    inventoryTitleEl.textContent = openChest ? "Inventory and Chest" : "Inventory";
+    inventoryItemsEl.innerHTML = "";
+    inventoryItemsEl.dataset.area = "inventory";
+    for (let i = 0; i < PLAYER_INV_CAP; i++) inventoryItemsEl.append(slotCard({ area: "inventory", index: i }, inventorySlots()[i]));
+
+    inventoryHotbarEl.innerHTML = "";
+    inventoryHotbarEl.dataset.area = "hotbar";
+    for (let i = 0; i < hotbar.length; i++) inventoryHotbarEl.append(slotCard({ area: "hotbar", index: i }, getSlot({ area: "hotbar", index: i }), hotbar[i].key));
+
+    chestPaneEl.hidden = !openChest;
+    chestItemsEl.innerHTML = "";
+    chestItemsEl.dataset.area = "chest";
+    if (openChest) {
+      const slots = chestSlots(openChest);
+      for (let i = 0; i < CHEST_INV_CAP; i++) chestItemsEl.append(slotCard({ area: "chest", index: i }, slots[i]));
+    }
+  }
+
+  function slotCard(ref, item, hotkey = "") {
+    const card = document.createElement("button");
+    const canUse = ref.area !== "hotbar" || HOTBAR_SWAP_SLOTS.includes(ref.index);
+    card.type = "button";
+    card.className = `item-card slot-cell${item ? " filled" : ""}${canUse ? " actionable" : " locked"}`;
+    card.dataset.area = ref.area;
+    card.dataset.index = String(ref.index);
+    card.disabled = !canUse;
+    card.draggable = Boolean(item && canUse);
+    const name = item ? label(item.id) : "Empty";
+    const qty = item?.qty ? `x${item.qty}` : "";
+    card.innerHTML = `<kbd>${hotkey || ref.index + 1}</kbd><b>${name}</b><span>${qty}${canUse ? "" : "Locked"}</span>`;
+    card.addEventListener("dragstart", (event) => {
+      if (!item || !canUse) return;
+      dragSlotRef = ref;
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", `${ref.area}:${ref.index}`);
+    });
+    card.addEventListener("dragover", (event) => {
+      if (canUse) event.preventDefault();
+    });
+    card.addEventListener("drop", (event) => {
+      event.preventDefault();
+      const source = dragSlotRef || parseSlotRef(event.dataTransfer.getData("text/plain"));
+      moveSlot(source, ref);
+      dragSlotRef = null;
+    });
+    return card;
+  }
+
+  function parseSlotRef(text) {
+    const [area, index] = String(text || "").split(":");
+    return area ? { area, index: Number(index) } : null;
+  }
+
+  function getSlot(ref) {
+    if (!ref) return null;
+    if (ref.area === "inventory") return normalizeSlot(inventorySlots()[ref.index]);
+    if (ref.area === "chest") return openChest ? normalizeSlot(chestSlots(openChest)[ref.index]) : null;
+    if (ref.area === "hotbar") {
+      const item = hotbar[ref.index];
+      return HOTBAR_SWAP_SLOTS.includes(ref.index) ? normalizeSlot(item) : null;
+    }
+    return null;
+  }
+
+  function setSlot(ref, item) {
+    const value = normalizeSlot(item);
+    if (ref.area === "inventory") inventorySlots()[ref.index] = value;
+    if (ref.area === "chest" && openChest) chestSlots(openChest)[ref.index] = value;
+    if (ref.area === "hotbar") setHotbarItem(ref.index, value);
+  }
+
+  function setHotbarItem(index, item) {
+    if (!HOTBAR_SWAP_SLOTS.includes(index)) return false;
+    const value = normalizeSlot(item);
+    hotbar[index].id = value ? value.id : "empty";
+    hotbar[index].name = value ? label(value.id) : "-";
+    if (value) hotbar[index].qty = value.qty;
+    else delete hotbar[index].qty;
+    return true;
+  }
+
+  function moveSlot(source, target, shouldRender = true) {
+    if (!source || !target) return false;
+    if (source.area === target.area && source.index === target.index) return false;
+    if (target.area === "hotbar" && !HOTBAR_SWAP_SLOTS.includes(target.index)) {
+      toast("That hotbar slot is locked.");
+      return false;
+    }
+    if (source.area === "hotbar" && !HOTBAR_SWAP_SLOTS.includes(source.index)) return false;
+    const sourceItem = getSlot(source);
+    const targetItem = getSlot(target);
+    if (!sourceItem) return false;
+    setSlot(target, sourceItem);
+    setSlot(source, targetItem);
+    syncManagedCountsFromSlots();
+    if (shouldRender) {
+      renderHotbar();
+      renderInventory();
+    }
+    return true;
+  }
+
+  function findSlotRefWithItem(area, id) {
+    const slots = area === "inventory" ? inventorySlots() : area === "chest" ? chestSlots(openChest) : hotbar;
+    if (area === "hotbar") {
+      const idx = HOTBAR_SWAP_SLOTS.find((slotIndex) => hotbar[slotIndex].id === id);
+      return idx === undefined ? null : { area, index: idx };
+    }
+    const idx = slots.findIndex((item) => item?.id === id);
+    return idx >= 0 ? { area, index: idx } : null;
+  }
+
+  function addPlayerItem(id, qty, preferred = "inventory") {
+    if (!isInventoryManaged(id) || qty <= 0) return false;
+    const slots = preferred === "hotbar" ? HOTBAR_SWAP_SLOTS.map((idx) => hotbar[idx]) : inventorySlots();
+    const stack = slots.find((item) => item?.id === id);
+    if (stack) {
+      stack.qty += qty;
+      syncManagedCountsFromSlots();
+      return true;
+    }
+    if (preferred === "hotbar") {
+      const emptyHotbar = HOTBAR_SWAP_SLOTS.find((idx) => hotbar[idx].id === "empty");
+      if (emptyHotbar !== undefined) {
+        setHotbarItem(emptyHotbar, slot(id, qty));
+        syncManagedCountsFromSlots();
+        return true;
+      }
+    }
+    const inv = inventorySlots();
+    const empty = inv.findIndex((item) => !item);
+    if (empty < 0) return false;
+    inv[empty] = slot(id, qty);
+    syncManagedCountsFromSlots();
+    return true;
+  }
+
+  function removePlayerItem(id, qty, preferredRef = null) {
+    if (!isInventoryManaged(id) || qty <= 0) return false;
+    const refs = [];
+    if (preferredRef && getSlot(preferredRef)?.id === id) refs.push(preferredRef);
+    for (const idx of HOTBAR_SWAP_SLOTS) refs.push({ area: "hotbar", index: idx });
+    for (let i = 0; i < PLAYER_INV_CAP; i++) refs.push({ area: "inventory", index: i });
+    let remaining = qty;
+    for (const ref of refs) {
+      const item = getSlot(ref);
+      if (!item || item.id !== id) continue;
+      const take = Math.min(remaining, item.qty);
+      item.qty -= take;
+      remaining -= take;
+      setSlot(ref, item.qty > 0 ? item : null);
+      if (remaining <= 0) break;
+    }
+    syncManagedCountsFromSlots();
+    renderHotbar();
+    renderInventory();
+    return remaining <= 0;
+  }
+
+  function syncManagedCountsFromSlots() {
+    for (const id of FOOD_ITEMS) state.resources[id] = managedItemCount(id);
+    state.resources.bandage = managedItemCount("bandage");
+    pendingBuild = {};
+    for (const id of Object.keys(recipes)) {
+      if (isBuildRecipe(id)) {
+        const qty = managedItemCount(id);
+        if (qty > 0) pendingBuild[id] = qty;
+      }
+    }
   }
 
   function renderRecipes() {
     renderRecipeBook();
+    renderInventory();
   }
 
   function recipeText(name) {
@@ -528,6 +929,7 @@
   function craftRecipe(name) {
     if (!gameStarted) return toast("Start survival first.");
     if (!recipes[name]) return;
+    if (!buildMode) return toast("Enter build mode with B to craft.");
     if (isBuildRecipe(name) && (pendingBuild[name] || 0) > 0) {
       selectBuildItem(name);
       recipeBookEl.hidden = true;
@@ -546,7 +948,6 @@
   function selectBuildItem(name) {
     buildChoice = name;
     buildMode = true;
-    selected = 8;
     heldItem = name;
     renderHotbar();
     renderRecipes();
@@ -554,31 +955,43 @@
 
   function chooseRecipe(name) {
     recipeBookEl.hidden = true;
-    if (isBuildRecipe(name)) {
-      selectBuildItem(name);
-      if ((pendingBuild[name] || 0) > 0) {
-        return toast(`Holding ${label(name)} to place.`);
-      }
-      if (canAfford(name)) return craftRecipe(name);
-      return toast(`Selected ${label(name)}. Gather the recipe materials to build it.`);
-    }
-    craftRecipe(name);
+    selectBuildItem(name);
+    const ready = isBuildRecipe(name) ? pendingBuild[name] || 0 : managedItemCount(name);
+    if (ready > 0 && isBuildRecipe(name)) return toast(`Holding ${label(name)} to place.`);
+    return toast(`Selected ${label(name)}. Click in build mode to craft${isBuildRecipe(name) ? " and place" : ""}.`);
+  }
+
+  function isToolRecipe(name) {
+    return ["spear", "metalAxe", "metalSpear", "metalHammer", "musket"].includes(name);
+  }
+
+  function isHotbarCraftRecipe(name) {
+    return isToolRecipe(name) || name === "flask";
+  }
+
+  function isCraftOnlyRecipe(name) {
+    return name === "bandage" || isHotbarCraftRecipe(name);
   }
 
   function isBuildRecipe(name) {
-    return Boolean(recipes[name]) && !["bandage", "spear"].includes(name);
+    return Boolean(recipes[name]) && !isCraftOnlyRecipe(name);
   }
 
   function craftCycleChoices() {
-    return Object.keys(recipes).filter((name) => isBuildRecipe(name) || name === "bandage");
+    return Object.keys(recipes).filter((name) => isBuildRecipe(name) || isCraftOnlyRecipe(name));
   }
 
   function canAfford(name) {
     const recipe = recipes[name];
+    if (devMode && recipe) return true;
     return Boolean(recipe) && Object.entries(recipe).every(([res, qty]) => (state.resources[res] || 0) >= qty);
   }
 
   function toggleRecipeBook() {
+    if (!buildMode) {
+      toast("Enter build mode with B to use the recipe book.");
+      return;
+    }
     recipeBookEl.hidden = !recipeBookEl.hidden;
     renderRecipeBook();
   }
@@ -593,59 +1006,220 @@
     }
   }
 
-  async function joinServerMode() {
-    scoreboardRows = [{ name: playerName, level: state.player.level, xp: state.player.totalXp || 0 }];
-    renderScoreboard();
-    if (location.protocol === "file:") return;
+  function playerNetState(id = serverPlayerId || localPeerId) {
+    return {
+      id,
+      name: playerName,
+      x: state.player.x,
+      y: state.player.y,
+      facing: state.player.facing,
+      level: state.player.level,
+      xp: state.player.totalXp || 0,
+      health: state.player.health,
+      stamina: state.player.stamina,
+      selectedItem: buildMode ? buildChoice : hotbar[selected]?.id || "empty"
+    };
+  }
+
+  async function serverPost(path, body) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 1200);
     try {
-      const res = await fetch("/api/join", {
+      const res = await fetch(`${SERVER_API_ROOT}${path}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: playerName })
+        body: JSON.stringify(body),
+        signal: controller.signal
       });
-      const data = await res.json();
+      if (!res.ok) throw new Error(`Server returned ${res.status}`);
+      return res.json();
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  async function joinServerMode() {
+    const local = playerNetState(localPeerId);
+    scoreboardRows = [local];
+    remotePlayers = [];
+    serverAggressiveSharks = [];
+    serverPlayerId = null;
+    usingLocalMultiplayer = false;
+    renderScoreboard();
+    try {
+      const data = await serverPost("/api/join", local);
       serverPlayerId = data.id;
+      usingLocalMultiplayer = false;
+      localPeers.clear();
+      applyServerPlayerState((data.players || []).find((p) => p.id === serverPlayerId));
       remotePlayers = (data.players || []).filter((p) => p.id !== serverPlayerId);
+      serverAggressiveSharks = data.serverSharks || [];
+      applyServerSharks(serverAggressiveSharks);
+      scoreboardRows = data.scoreboard || [playerNetState(serverPlayerId)];
+      renderScoreboard();
     } catch {
       serverPlayerId = null;
+      joinLocalMultiplayer();
     }
   }
 
   async function updateServerMode(dt) {
     serverSyncTimer += dt;
-    if (serverSyncTimer < 1) return;
+    if (serverSyncTimer < 0.28) return;
     serverSyncTimer = 0;
-    const local = { name: playerName, level: state.player.level, xp: state.player.totalXp || 0 };
-    if (location.protocol === "file:" || !serverPlayerId) {
-      scoreboardRows = [local];
-      remotePlayers = [];
-      renderScoreboard();
+    if (!serverPlayerId) {
+      if (!usingLocalMultiplayer) joinLocalMultiplayer();
+      else updateLocalMultiplayer();
       return;
     }
+    if (serverSyncInFlight) return;
+    serverSyncInFlight = true;
     try {
-      const res = await fetch("/api/state", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          id: serverPlayerId,
-          name: playerName,
-          x: state.player.x,
-          y: state.player.y,
-          facing: state.player.facing,
-          level: state.player.level,
-          xp: state.player.totalXp || 0,
-          health: state.player.health
-        })
-      });
-      const data = await res.json();
-      scoreboardRows = data.scoreboard || [local];
+      const data = await serverPost("/api/state", playerNetState(serverPlayerId));
+      if (data.id) serverPlayerId = data.id;
+      usingLocalMultiplayer = false;
+      applyServerPlayerState((data.players || []).find((p) => p.id === serverPlayerId));
+      scoreboardRows = data.scoreboard || [playerNetState(serverPlayerId)];
       remotePlayers = (data.players || []).filter((p) => p.id !== serverPlayerId);
+      serverAggressiveSharks = data.serverSharks || [];
+      applyServerSharks(serverAggressiveSharks);
       renderScoreboard();
     } catch {
-      scoreboardRows = [local];
-      remotePlayers = [];
-      renderScoreboard();
+      serverPlayerId = null;
+      joinLocalMultiplayer();
+    } finally {
+      serverSyncInFlight = false;
     }
+  }
+
+  function joinLocalMultiplayer() {
+    usingLocalMultiplayer = true;
+    ensureLocalChannel();
+    publishLocalPeer("state");
+    updateLocalMultiplayer(true);
+  }
+
+  function ensureLocalChannel() {
+    if (localChannel || !("BroadcastChannel" in window)) return;
+    try {
+      localChannel = new BroadcastChannel("raaft-io-local-players");
+      localChannel.onmessage = (event) => receiveLocalPeer(event.data);
+    } catch {
+      localChannel = null;
+    }
+  }
+
+  function publishLocalPeer(type = "state") {
+    if (!gameStarted && type !== "leave") return;
+    const payload = { type, ...playerNetState(localPeerId), seen: Date.now() };
+    if (localChannel) localChannel.postMessage(payload);
+    try {
+      if (type === "leave") localStorage.removeItem(`raaft-io-peer-${localPeerId}`);
+      else localStorage.setItem(`raaft-io-peer-${localPeerId}`, JSON.stringify(payload));
+    } catch {
+      // Local file pages can block storage; BroadcastChannel still handles live tabs.
+    }
+  }
+
+  function receiveLocalPeer(data) {
+    if (!data || data.id === localPeerId) return;
+    if (data.type === "leave" || data.health <= 0) {
+      localPeers.delete(data.id);
+      updateLocalPeerRows();
+      return;
+    }
+    localPeers.set(data.id, { ...data, seen: data.seen || Date.now() });
+    updateLocalPeerRows();
+  }
+
+  function readLocalStoragePeers() {
+    try {
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (!key || !key.startsWith("raaft-io-peer-")) continue;
+        const data = JSON.parse(localStorage.getItem(key) || "{}");
+        if (!data.seen || data.seen < Date.now() - 5000) {
+          localStorage.removeItem(key);
+          continue;
+        }
+        receiveLocalPeer(data);
+      }
+    } catch {
+      // Some browsers restrict localStorage for file URLs.
+    }
+  }
+
+  function updateLocalMultiplayer(force = false) {
+    if (!usingLocalMultiplayer && !force) return;
+    ensureLocalChannel();
+    publishLocalPeer("state");
+    readLocalStoragePeers();
+    const staleAt = Date.now() - 5000;
+    for (const [id, peer] of localPeers) {
+      if ((peer.seen || 0) < staleAt) localPeers.delete(id);
+    }
+    updateLocalPeerRows();
+  }
+
+  function updateLocalPeerRows() {
+    const local = playerNetState(localPeerId);
+    const peers = [...localPeers.values()].filter((p) => p.health > 0);
+    scoreboardRows = [local, ...peers];
+    remotePlayers = peers;
+    renderScoreboard();
+  }
+
+  function applyServerSharks(sharks) {
+    const claimed = new Set();
+    for (const serverShark of sharks || []) {
+      let shark = state.sharks.find((item) => item.serverId === serverShark.id);
+      if (!shark) {
+        shark = state.sharks.find((item) => !item.serverId && item.aggressive && !claimed.has(item));
+      }
+      if (!shark) shark = state.sharks.find((item) => !item.serverId && !claimed.has(item));
+      if (!shark) continue;
+      claimed.add(shark);
+      shark.serverId = serverShark.id;
+      shark.serverControlled = true;
+      shark.serverTargetId = serverShark.targetId || null;
+      shark.x = cleanCoord(serverShark.x, shark.x);
+      shark.y = cleanCoord(serverShark.y, shark.y);
+      shark.wander = cleanCoord(serverShark.facing, shark.wander);
+      shark.aggressive = true;
+      shark.aggro = 99;
+      shark.flee = 0;
+      shark.hp = SHARK_HP;
+    }
+    for (const shark of state.sharks) {
+      if (shark.serverControlled && !claimed.has(shark)) {
+        shark.serverControlled = false;
+        shark.serverId = null;
+        shark.serverTargetId = null;
+      }
+      if ((sharks || []).length && !claimed.has(shark)) shark.aggressive = false;
+    }
+  }
+
+  function applyServerPlayerState(serverPlayer) {
+    if (!serverPlayer || devMode || !state.player.alive) return;
+    const serverHealth = clamp(cleanCoord(serverPlayer.health, state.player.health), 0, 100);
+    if (serverHealth >= state.player.health) return;
+    state.player.health = serverHealth;
+    toast("A server shark bit you.");
+    if (state.player.health <= 0) {
+      state.player.health = 0;
+      state.player.alive = false;
+      gameStarted = false;
+      publishLocalPeer("leave");
+      fallenNameEl.textContent = state.player.name || playerName;
+      document.getElementById("survived").textContent = state.day;
+      gameOverEl.hidden = false;
+    }
+  }
+
+  function cleanCoord(value, fallback) {
+    const number = Number(value);
+    return Number.isFinite(number) ? number : fallback;
   }
 
   function renderScoreboard() {
@@ -657,7 +1231,11 @@
     for (const row of rows) {
       const item = document.createElement("div");
       item.className = "score-row";
-      item.innerHTML = `<span>${row.name || "Player"}</span><span>Lv ${row.level || 1}</span>`;
+      const name = document.createElement("span");
+      name.textContent = row.name || "Player";
+      const level = document.createElement("span");
+      level.textContent = `Lv ${row.level || 1}`;
+      item.append(name, level);
       scoreboardListEl.append(item);
     }
   }
@@ -695,19 +1273,25 @@
 
     const p = state.player;
     if (activeCannon && (activeCannon.hp <= 0 || dist(activeCannon, p) > 92)) activeCannon = null;
+    if (openChest && (openChest.hp <= 0 || dist(openChest, p) > 92)) closeInventory();
     p.attackCd = Math.max(0, p.attackCd - dt);
     if (toolAnim.t > 0) {
       toolAnim.t = Math.max(0, toolAnim.t - dt);
       if (toolAnim.t <= 0) toolAnim.kind = null;
     }
     p.invuln = Math.max(0, p.invuln - dt);
+    musketCooldown = Math.max(0, musketCooldown - dt);
     dayClock += dt;
     state.day = Math.floor(dayClock / 90) + 1;
 
-    const drain = isOnRaft(p) ? 1 : 1.35;
-    p.hunger = clamp(p.hunger - dt * 0.34 * drain, 0, 100);
-    p.thirst = clamp(p.thirst - dt * 0.46 * drain, 0, 100);
-    if (p.hunger <= 0 || p.thirst <= 0) hurt((p.hunger <= 0 && p.thirst <= 0 ? 7 : 4) * dt, "Starvation and dehydration are winning.");
+    if (devMode) {
+      applyDevToken();
+    } else {
+      const drain = isOnRaft(p) ? 1 : 1.35;
+      p.hunger = clamp(p.hunger - dt * 0.34 * drain, 0, 100);
+      p.thirst = clamp(p.thirst - dt * 0.46 * drain, 0, 100);
+      if (p.hunger <= 0 || p.thirst <= 0) hurt((p.hunger <= 0 && p.thirst <= 0 ? 7 : 4) * dt, "Starvation and dehydration are winning.");
+    }
 
     const inWater = !isOnRaft(p) && !isOnIsland(p);
     if (inWater) {
@@ -762,7 +1346,7 @@
     updateWorldRespawns(dt);
     updateParticles(dt);
 
-    if (state.debris.length < 135) spawnDebris();
+    if (state.debris.length < 180) spawnDebris();
     state.camera.x += (p.x - state.camera.x) * 0.12;
     state.camera.y += (p.y - state.camera.y) * 0.12;
     updateMouseWorld();
@@ -792,7 +1376,7 @@
   }
 
   function isOnIsland(p) {
-    return state.islands.some((island) => Math.hypot(p.x - island.x, p.y - island.y) < island.r * 0.92);
+    return state.islands.some((island) => Math.hypot(p.x - island.x, p.y - island.y) <= island.r * ISLAND_WALK_SCALE);
   }
 
   function raftTileRect(rt) {
@@ -939,11 +1523,33 @@
       a.hit = Math.max(0, a.hit - dt);
       a.cd = Math.max(0, a.cd - dt);
       const p = state.player;
-      const near = dist(a, p);
+      let near = dist(a, p);
       let vx = Math.cos(a.wander) * 0.25;
       let vy = Math.sin(a.wander) * 0.25;
       const playerIsland = islandAt(p);
       const crocodileOnLand = a.type === "crocodile" && playerIsland && a.homeIsland === playerIsland;
+      if (a.type === "crocodile" && a.submerged) {
+        if (!crocodileOnLand) continue;
+        const emerge = waterPointAroundIsland(a.homeIsland || playerIsland, rnd(34, 76));
+        a.x = emerge.x;
+        a.y = emerge.y;
+        a.wander = angleTo(a, p);
+        a.submerged = false;
+        near = dist(a, p);
+      }
+      if (a.type === "crocodile" && !crocodileOnLand) {
+        const home = a.homeIsland || nearestIsland(a);
+        if (!home || dist(a, home) > home.r * ISLAND_WALK_SCALE + 4) {
+          a.submerged = true;
+          continue;
+        }
+        const away = angleTo(home, a);
+        a.wander = away;
+        a.x += Math.cos(away) * a.speed * 1.65 * dt;
+        a.y += Math.sin(away) * a.speed * 1.65 * dt;
+        resolveWallCollision(a, 24);
+        continue;
+      }
       const noticeRange = a.type === "crocodile" ? 999 : a.type === "crab" ? 55 : a.type === "pig" ? 90 : 125;
       if (crocodileOnLand || near < noticeRange) {
         const aa = angleTo(a, p);
@@ -971,7 +1577,6 @@
         a.y += Math.sin(back) * a.speed * 2 * dt;
         a.wander = back;
       }
-      if (a.type === "crocodile" && (!playerIsland || a.homeIsland !== playerIsland)) continue;
       if (near < (a.type === "crocodile" ? 34 : 28) && a.cd <= 0) {
         hurt(a.dmg, `${cap(a.type)} hit you.`);
         a.cd = a.type === "crocodile" ? 1.25 : a.type === "elephant" ? 1.4 : 0.9;
@@ -1014,7 +1619,7 @@
       s.finBob += dt * 2.4;
       if (Math.random() < dt * 0.25) s.wander += rnd(-0.65, 0.65);
       const aggro = s.aggressive || s.aggro > 0;
-      const target = land ? sharkWaterPoint(land, s) : aggro && isOnRaft(p) ? nearestRaftEdge(s) : aggro ? p : null;
+      const target = aggro ? sharkTarget(s, land) : null;
       let a = target ? (s.flee > 0 ? angleTo(target, s) : angleTo(s, target)) : s.wander;
       a = steerAroundIslands(s, a);
       const spd = s.flee > 0 ? 125 : aggro ? 105 : 42;
@@ -1034,19 +1639,29 @@
         hurt(SHARK_BITE_DAMAGE, "The shark bit you.");
         s.bite = 1.3;
       }
-      const edge = nearestRaftEdge(s);
-      if (aggro && isOnRaft(p) && dist(s, edge) < 42 && s.bite <= 0 && state.raft.length > 2) {
-        const victim = state.raft[Math.floor(Math.random() * state.raft.length)];
+      const victim = nearestRaftTile(s) || state.raft[0];
+      const victimCenter = victim ? raftTileCenter(victim) : null;
+      if (aggro && victimCenter && dist(s, victimCenter) < 70 && s.bite <= 0 && state.raft.length > 2) {
         damageRaftBlock(victim, SHARK_RAFT_DAMAGE);
-        s.bite = 2.2;
+        s.bite = 1.65;
         toast("Angry shark is chewing the raft.");
         if (victim.hp <= 0) breakRaftTile(victim);
       }
     }
   }
 
+  function sharkTarget(shark, localLand) {
+    const targetId = shark.serverTargetId;
+    if (targetId) {
+      if (targetId === serverPlayerId || targetId === localPeerId) return localLand ? sharkWaterPoint(localLand, shark) : state.player;
+      const remote = remotePlayers.find((player) => player.id === targetId && player.health > 0);
+      if (remote) return remote;
+    }
+    return localLand ? sharkWaterPoint(localLand, shark) : state.player;
+  }
+
   function islandAt(p) {
-    return state.islands.find((island) => Math.hypot(p.x - island.x, p.y - island.y) < island.r * 0.92);
+    return state.islands.find((island) => Math.hypot(p.x - island.x, p.y - island.y) <= island.r * ISLAND_WALK_SCALE);
   }
 
   function sharkWaterPoint(island, s) {
@@ -1103,6 +1718,26 @@
     rt.hp -= amount;
   }
 
+  function nearestRaftTile(from) {
+    let best = null;
+    let bestD = Infinity;
+    for (const rt of state.raft) {
+      const r = raftTileRect(rt);
+      const c = { x: r.x + TILE / 2, y: r.y + TILE / 2 };
+      const d = dist(from, c);
+      if (d < bestD) {
+        best = rt;
+        bestD = d;
+      }
+    }
+    return best;
+  }
+
+  function raftTileCenter(rt) {
+    const r = raftTileRect(rt);
+    return { x: r.x + TILE / 2, y: r.y + TILE / 2 };
+  }
+
   function breakRaftTile(rt) {
     if (state.raft.length <= 2) return;
     const doomed = state.structures.filter((st) => st.base === "raft" && raftAt(st.x, st.y) === rt);
@@ -1153,7 +1788,7 @@
         if (st.timer <= 0) {
           st.timer = 0;
           st.ready = true;
-          toast("Water maker filled a glass.");
+          toast("Water maker filled the flask.");
         }
       }
       if (st.type === "plantPot" && st.timer > 0) {
@@ -1177,7 +1812,10 @@
       if (shot.life <= 0 || hitsWall(shot, 7)) {
         shot.dead = true;
       }
-      if (!shot.dead && shot.age > 0.06) {
+      if (!shot.dead && shot.type === "musketBall" && shot.age > 0.04) {
+        shot.dead = damageDirectShot(shot);
+      }
+      if (!shot.dead && shot.type === "cannonball" && shot.age > 0.06) {
         const hitAnimal = state.animals.some((a) => !a.dead && dist(a, shot) < 20);
         const hitShark = state.sharks.some((s) => dist(s, shot) < 35);
         const armedForBlocks = shot.age > 0.18;
@@ -1188,9 +1826,12 @@
         });
         if (hitAnimal || hitShark || hitStructure || hitRaft) shot.dead = true;
       }
-      if (shot.dead && !shot.exploded) {
+      if (shot.dead && !shot.exploded && shot.type === "cannonball") {
         shot.exploded = true;
         explodeCannonball(shot);
+      } else if (shot.dead && !shot.exploded && shot.type === "musketBall") {
+        shot.exploded = true;
+        burst(shot.x, shot.y, "#d2d7d9", 6);
       }
     }
     state.projectiles = state.projectiles.filter((shot) => !shot.dead);
@@ -1214,6 +1855,65 @@
       radius: 52
     });
     burst(cannon.x + Math.cos(angle) * 32, cannon.y + Math.sin(angle) * 32, "#ffe0a3", 9);
+  }
+
+  function fireMusket() {
+    const p = state.player;
+    if (musketCooldown > 0) return toast(`Musket reloading: ${Math.ceil(musketCooldown)}s.`);
+    if (!spendStamina(14)) return;
+    const angle = angleTo(p, mouseWorld());
+    musketCooldown = 7;
+    state.projectiles.push({
+      type: "musketBall",
+      x: p.x + Math.cos(angle) * 38,
+      y: p.y + Math.sin(angle) * 38,
+      vx: Math.cos(angle) * 560,
+      vy: Math.sin(angle) * 560,
+      age: 0,
+      life: 1.05,
+      damage: 21,
+      radius: 8
+    });
+    burst(p.x + Math.cos(angle) * 34, p.y + Math.sin(angle) * 34, "#ffe7a8", 8);
+  }
+
+  function damageDirectShot(shot) {
+    for (const a of state.animals) {
+      if (a.dead || a.submerged || dist(a, shot) > 24) continue;
+      a.hp -= shot.damage;
+      a.hit = 0.25;
+      if (a.hp <= 0) killAnimal(a);
+      gainXp(3);
+      return true;
+    }
+    for (const s of state.sharks) {
+      if (dist(s, shot) > 34) continue;
+      s.hp -= shot.damage;
+      s.aggro = 18;
+      s.flee = 0.5;
+      if (s.hp <= 0) {
+        addRes("sharkMeat", 3);
+        gainXp(45);
+        respawnShark(s);
+        toast("Musket sank a shark. Shark meat acquired.");
+      }
+      return true;
+    }
+    for (const st of [...state.structures]) {
+      if (dist(st, shot) > footprintRadius(st.type) + 7) continue;
+      st.hp -= Math.max(6, Math.round(shot.damage * 0.45));
+      if (st.hp <= 0) {
+        state.structures = state.structures.filter((item) => item !== st);
+        if (activeCannon === st) activeCannon = null;
+      }
+      return true;
+    }
+    const hitRemote = remotePlayers.find((other) => other && other.health > 0 && dist(other, shot) < 22);
+    if (hitRemote) {
+      hitRemote.health = Math.max(0, (hitRemote.health || 100) - shot.damage);
+      return true;
+    }
+    return false;
   }
 
   function explodeCannonball(shot) {
@@ -1315,7 +2015,7 @@
       const occupiedByStructure = state.structures.some((st) => dist(st, p) < footprintRadius(st.type) + radius);
       const occupiedByTree = island.trees.some((tree) => !tree.dead && dist(tree, p) < radius + 18);
       const occupiedByAnimal = state.animals.some((a) => !a.dead && dist(a, p) < radius + 18);
-      const inWreck = island.shipwreck && dist(island.shipwreck, p) < 76;
+      const inWreck = island.shipwreck && dist(island.shipwreck, p) < SHIPWRECK_CLEAR_RADIUS;
       if (!occupiedByStructure && !occupiedByTree && !occupiedByAnimal && !inWreck) return p;
     }
     return pointOnIsland(island, scale);
@@ -1351,15 +2051,25 @@
     updateMouseWorld();
     if (activeCannon) return fireCannon(activeCannon);
     if (state.player.stamina <= 0) return toast("Too exhausted to act. Rest for a moment.");
-    const id = hotbar[selected].id;
+    const id = hotbar[selected]?.id || "empty";
     if (buildMode) return placeBuild();
     if (id === "rod") return useRod();
-    if (id === "axe") return swing("axe");
-    if (id === "spear") return swing("spear");
-    if (id === "hammer") return swing("hammer");
+    if (id === "axe" || id === "metalAxe") return swing(id);
+    if (id === "spear" || id === "metalSpear") return swing(id);
+    if (id === "hammer" || id === "metalHammer") return swing(id);
+    if (id === "musket") return fireMusket();
     if (id === "bandage") return useBandage();
-    if (id === "food") return eatFood();
-    if (id === "glass") return drinkWater();
+    if (FOOD_ITEMS.includes(id)) {
+      if (!spendStamina(2)) return;
+      if (!eatSpecificFood(id)) toast(`No ${label(id)}.`);
+      return;
+    }
+    if (id === "flask" || id === "waterFlask") return drinkWater();
+    if (isBuildRecipe(id)) {
+      buildChoice = id;
+      buildMode = true;
+      return placeBuild();
+    }
   }
 
   function useRod() {
@@ -1373,13 +2083,16 @@
   function swing(kind) {
     const p = state.player;
     if (p.attackCd > 0) return;
-    if (!spendStamina(kind === "spear" ? 9 : 8)) return;
-    p.attackCd = kind === "spear" ? 0.48 : 0.62;
-    toolAnim = { kind, t: p.attackCd, duration: p.attackCd };
-    const reach = kind === "spear" ? 82 : 58;
-    const damage = (kind === "spear" ? 28 : kind === "axe" ? 20 : 12) + p.strength * 3;
+    const metal = kind.startsWith("metal");
+    const baseKind = kind.includes("Spear") || kind === "spear" ? "spear" : kind.includes("Axe") || kind === "axe" ? "axe" : "hammer";
+    if (!spendStamina(baseKind === "spear" ? (metal ? 10 : 9) : metal ? 9 : 8)) return;
+    p.attackCd = baseKind === "spear" ? (metal ? 0.42 : 0.48) : metal ? 0.56 : 0.62;
+    toolAnim = { kind: baseKind, t: p.attackCd, duration: p.attackCd };
+    const reach = baseKind === "spear" ? (metal ? 96 : 82) : metal ? 68 : 58;
+    const baseDamage = baseKind === "spear" ? (metal ? 38 : 28) : baseKind === "axe" ? (metal ? 28 : 20) : metal ? 18 : 12;
+    const damage = baseDamage + p.strength * 3;
     const targetAngle = angleTo(p, mouseWorld());
-    burst(p.x + Math.cos(targetAngle) * 34, p.y + Math.sin(targetAngle) * 34, kind === "hammer" ? "#b8d4de" : "#fff3c9", 6);
+    burst(p.x + Math.cos(targetAngle) * 34, p.y + Math.sin(targetAngle) * 34, baseKind === "hammer" ? "#b8d4de" : "#fff3c9", 6);
 
     for (const a of state.animals) {
       if (dist(p, a) < reach && Math.abs(shortAngle(targetAngle - angleTo(p, a))) < 0.9) {
@@ -1404,9 +2117,9 @@
       }
       return;
     }
-    if (kind === "axe" && damagePlacedItem(reach, targetAngle, Math.round(damage * 0.6))) return;
-    if (kind === "axe") chopTree(reach, targetAngle, damage);
-    if (kind === "hammer") repairTile(reach);
+    if (baseKind === "axe" && damagePlacedItem(reach, targetAngle, Math.round(damage * (metal ? 0.65 : 0.52)))) return;
+    if (baseKind === "axe") chopTree(reach, targetAngle, damage);
+    if (baseKind === "hammer") repairTile(reach);
   }
 
   function damagePlacedItem(reach, targetAngle, damage) {
@@ -1470,13 +2183,14 @@
   }
 
   function respawnShark(shark) {
-    const p = randomOceanPoint(700, state.player, state.islands);
+    const aggressive = Math.random() < SHARK_AGGRESSION_CHANCE;
+    const p = randomOceanPoint(aggressive ? 380 : 700, state.player, state.islands);
     shark.x = p.x;
     shark.y = p.y;
     shark.hp = SHARK_HP;
     shark.bite = 0;
     shark.flee = 0;
-    shark.aggressive = Math.random() < 0.25;
+    shark.aggressive = aggressive;
     shark.aggro = shark.aggressive ? 99 : 0;
     shark.wander = rnd(0, TAU);
   }
@@ -1575,7 +2289,7 @@
         }
       }
       const wreck = island.shipwreck;
-      if (wreck && dist(p, wreck) < 135) {
+      if (wreck && dist(p, wreck) < SHIPWRECK_INTERACT_RADIUS) {
         for (const loot of wreck.loot) {
           if (!loot.dead && dist(p, loot) < 42) {
             loot.dead = true;
@@ -1611,7 +2325,8 @@
       }
       const cookable = state.resources.rawFish > 0 ? "rawFish" : state.resources.sharkMeat > 0 ? "sharkMeat" : state.resources.meat > 0 ? "meat" : null;
       if (st.timer <= 0 && cookable) {
-        state.resources[cookable]--;
+        if (FOOD_ITEMS.includes(cookable)) removePlayerItem(cookable, 1);
+        else state.resources[cookable]--;
         st.cooking = cookable;
         st.timer = GRILL_TIME;
         st.maxTimer = GRILL_TIME;
@@ -1623,24 +2338,35 @@
     }
     if (st.type === "waterMaker") {
       if (st.ready) {
+        let returned = false;
+        if (HOTBAR_SWAP_SLOTS.includes(selected) && hotbar[selected].id === "empty") {
+          returned = setHotbarItem(selected, slot("waterFlask", 1));
+          syncManagedCountsFromSlots();
+        } else {
+          returned = addPlayerItem("waterFlask", 1, "hotbar");
+        }
+        if (!returned) {
+          st.ready = true;
+          st.hasGlass = true;
+          return toast("Need room for the filled flask.");
+        }
         st.ready = false;
         st.hasGlass = false;
-        state.resources.glass++;
-        state.player.thirst = clamp(state.player.thirst + 34, 0, 100);
         gainXp(4);
         renderHotbar();
-        return toast("Drank clean water. Glass returned.");
+        return toast("Filled water flask returned.");
       }
-      if (st.timer <= 0 && state.resources.glass > 0) {
-        state.resources.glass--;
+      if (hotbar[selected]?.id !== "flask") return toast("Select the water flask to use the water maker.");
+      if (st.timer <= 0 && getSlot({ area: "hotbar", index: selected })?.id === "flask") {
+        removePlayerItem("flask", 1, { area: "hotbar", index: selected });
         st.hasGlass = true;
         st.timer = WATER_TIME;
         st.maxTimer = WATER_TIME;
         st.ready = false;
         renderHotbar();
-        return toast("Water maker is distilling.");
+        return toast("Water maker is filling your flask.");
       }
-      return toast("Need an empty glass.");
+      return toast("Need an empty water flask.");
     }
     if (st.type === "plantPot") {
       if (st.ready) {
@@ -1650,8 +2376,8 @@
         gainXp(5);
         return toast("Tomatoes harvested.");
       }
-      if (st.timer <= 0 && state.resources.tomato > 0) {
-        state.resources.tomato--;
+      if (st.timer <= 0 && managedItemCount("tomato") > 0) {
+        removePlayerItem("tomato", 1);
         st.planted = true;
         st.ready = false;
         st.timer = TOMATO_GROW_TIME;
@@ -1662,7 +2388,8 @@
       return toast("Need a tomato to plant.");
     }
     if (st.type === "chest") {
-      return toast("Chest placed. Supplies stay safe inside.");
+      openInventory(st);
+      return toast("Chest opened.");
     }
   }
 
@@ -1671,22 +2398,34 @@
     if (!spendStamina(3)) return false;
     const recipe = recipes[name];
     if (!recipe) return false;
-    for (const [res, qty] of Object.entries(recipe)) {
-      if ((state.resources[res] || 0) < qty) {
-        toast(`Need ${qty} ${res}.`);
-        return false;
-      }
+    if ((name === "bandage" || isBuildRecipe(name)) && !playerHasInventorySpaceFor(name)) {
+      toast("Backpack is full.");
+      return false;
     }
-    for (const [res, qty] of Object.entries(recipe)) state.resources[res] -= qty;
+    if (isHotbarCraftRecipe(name) && !playerHasItemSpaceFor(name)) {
+      toast("Backpack and hotbar are full.");
+      return false;
+    }
+    if (!devMode) {
+      for (const [res, qty] of Object.entries(recipe)) {
+        if ((state.resources[res] || 0) < qty) {
+          toast(`Need ${qty} ${res}.`);
+          return false;
+        }
+      }
+      for (const [res, qty] of Object.entries(recipe)) state.resources[res] -= qty;
+    }
     if (name === "bandage") {
-      addRes("bandage", 1);
+      if (!addPlayerItem("bandage", 1)) return toast("Backpack is full.");
       toast("Bandage crafted.");
-    } else if (name === "spear") {
-      hotbar[3].name = "Pig Spear";
-      if (holdAfterCraft) selectHeldTool("spear");
-      toast("Pig Spear crafted. Longer reach unlocked.");
+    } else if (isHotbarCraftRecipe(name)) {
+      if (!addPlayerItem(name, 1, "hotbar")) return toast("Backpack and hotbar are full.");
+      putItemInHotbar(name, true);
+      buildMode = false;
+      heldItem = name;
+      toast(`${label(name)} crafted.`);
     } else {
-      pendingBuild[name] = (pendingBuild[name] || 0) + 1;
+      if (!addPlayerItem(name, 1)) return toast("Backpack is full.");
       buildChoice = name;
       buildMode = true;
       heldItem = name;
@@ -1703,8 +2442,8 @@
   function placeBuild() {
     updateMouseWorld();
     if (!isBuildRecipe(buildChoice)) {
-      if (buildChoice === "bandage") {
-        if (craft("bandage", false)) toast("Bandage crafted into inventory.");
+      if (isCraftOnlyRecipe(buildChoice)) {
+        craft(buildChoice, false);
         return;
       }
       return toast(`${label(buildChoice)} cannot be placed.`);
@@ -1730,7 +2469,7 @@
     if (!site) return toast("Place blocks fully on your raft or on island ground.");
     const angle = state.player.facing + buildAngle;
     const candidate = createStructure(buildChoice, spot.x, spot.y, angle, site.kind);
-    if (state.structures.some((s) => footprintsOverlap(candidate, s))) return toast("That spot is occupied.");
+    if (state.structures.some((s) => placementFootprintsOverlap(candidate, s))) return toast("That spot is occupied.");
     state.structures.push(candidate);
     consumeBuild(buildChoice);
     toast(`${label(buildChoice)} placed.`);
@@ -1738,13 +2477,17 @@
   }
 
   function ensureBuildReady(name) {
-    if ((pendingBuild[name] || 0) > 0) return true;
+    if (managedItemCount(name) > 0) return true;
+    if (!playerHasInventorySpaceFor(name)) {
+      toast("Backpack is full.");
+      return false;
+    }
     if (!canAfford(name)) {
       toast(`${label(name)} selected. Need ${recipeText(name)} to craft it.`);
       return false;
     }
-    for (const [res, qty] of Object.entries(recipes[name])) state.resources[res] -= qty;
-    pendingBuild[name] = (pendingBuild[name] || 0) + 1;
+    if (!devMode) for (const [res, qty] of Object.entries(recipes[name])) state.resources[res] -= qty;
+    if (!addPlayerItem(name, 1)) return false;
     gainXp(7);
     renderHotbar();
     renderRecipes();
@@ -1762,15 +2505,25 @@
 
   function createStructure(type, x, y, angle = 0, base = "raft") {
     const maxHp = blockHp[type] || 80;
-    return { type, x, y, angle, base, hp: maxHp, maxHp, timer: 0, maxTimer: 0, ready: false, hasGlass: false, planted: false, aimOffset: 0, cooldown: 0 };
+    return { type, x, y, angle, base, hp: maxHp, maxHp, timer: 0, maxTimer: 0, ready: false, hasGlass: false, planted: false, aimOffset: 0, cooldown: 0, storage: type === "chest" ? emptySlots(CHEST_INV_CAP) : null };
   }
 
   function footprint(type) {
     return blockFootprints[type] || { w: STRUCTURE_RADIUS * 2, h: STRUCTURE_RADIUS * 2 };
   }
 
+  function placementFootprint(type) {
+    const f = footprint(type);
+    return { w: f.w * PLACEMENT_FOOTPRINT_SCALE, h: f.h * PLACEMENT_FOOTPRINT_SCALE };
+  }
+
   function footprintRadius(type) {
     const f = footprint(type);
+    return Math.hypot(f.w, f.h) / 2;
+  }
+
+  function placementFootprintRadius(type) {
+    const f = placementFootprint(type);
     return Math.hypot(f.w, f.h) / 2;
   }
 
@@ -1781,8 +2534,15 @@
     return axes.every((axis) => projectionsOverlap(projectCorners(aCorners, axis), projectCorners(bCorners, axis)));
   }
 
-  function footprintCorners(obj) {
-    const f = footprint(obj.type);
+  function placementFootprintsOverlap(a, b) {
+    const aCorners = footprintCorners(a, placementFootprint);
+    const bCorners = footprintCorners(b, placementFootprint);
+    const axes = [...rectAxes(aCorners), ...rectAxes(bCorners)];
+    return axes.every((axis) => projectionsOverlap(projectCorners(aCorners, axis), projectCorners(bCorners, axis)));
+  }
+
+  function footprintCorners(obj, footprintFn = footprint) {
+    const f = footprintFn(obj.type);
     const hw = f.w / 2;
     const hh = f.h / 2;
     const angle = obj.angle || 0;
@@ -1875,13 +2635,14 @@
   }
 
   function consumeBuild(name) {
-    pendingBuild[name] = Math.max(0, (pendingBuild[name] || 0) - 1);
-    if (!pendingBuild[name]) {
+    removePlayerItem(name, 1, HOTBAR_SWAP_SLOTS.includes(selected) ? { area: "hotbar", index: selected } : null);
+    if (!managedItemCount(name)) {
       const next = Object.keys(pendingBuild).find((key) => pendingBuild[key] > 0);
       if (next) buildChoice = next;
       else buildMode = false;
     }
     renderRecipes();
+    renderHotbar();
   }
 
   function rotateBuild() {
@@ -1910,15 +2671,12 @@
     if (!foods.length) return toast("No food to select.");
     const current = selectedFood && foods.includes(selectedFood) ? foods.indexOf(selectedFood) : -1;
     selectedFood = foods[(current + 1) % foods.length];
-    selected = 6;
-    buildMode = false;
-    heldItem = selectedFood;
-    renderHotbar();
+    putItemInHotbar(selectedFood, true);
     toast(`Food selected: ${label(selectedFood)}.`);
   }
 
   function buildSiteAt(x, y) {
-    const radius = footprintRadius(buildChoice);
+    const radius = placementFootprintRadius(buildChoice);
     const rt = raftAt(x, y);
     if (rt) {
       const r = raftTileRect(rt);
@@ -1926,8 +2684,8 @@
       const fits = x > r.x + raftPadding && x < r.x + TILE - raftPadding && y > r.y + raftPadding && y < r.y + TILE - raftPadding;
       return fits ? { kind: "raft", tile: rt } : null;
     }
-    const island = islandAt({ x, y });
-    if (island && Math.hypot(x - island.x, y - island.y) < island.r * 0.9 - radius) return { kind: "island", island };
+    const island = state.islands.find((item) => Math.hypot(x - item.x, y - item.y) <= item.r + 4 - radius * 0.15);
+    if (island) return { kind: "island", island };
     return null;
   }
 
@@ -1940,16 +2698,16 @@
 
   function useBandage() {
     if (!spendStamina(4)) return;
-    if (state.resources.bandage <= 0) return toast("No bandages.");
-    state.resources.bandage--;
+    if (managedItemCount("bandage") <= 0) return toast("No bandages.");
+    removePlayerItem("bandage", 1, HOTBAR_SWAP_SLOTS.includes(selected) ? { area: "hotbar", index: selected } : null);
     state.player.health = clamp(state.player.health + 35, 0, 100);
+    renderHotbar();
     toast("Bandage used.");
   }
 
   function eatFood() {
     if (!spendStamina(2)) return;
-    const r = state.resources;
-    const foods = selectedFood && r[selectedFood] > 0 ? [selectedFood] : availableFoods();
+    const foods = selectedFood && managedItemCount(selectedFood) > 0 ? [selectedFood] : availableFoods();
     for (const food of foods) {
       if (eatSpecificFood(food)) return;
     }
@@ -1957,10 +2715,9 @@
   }
 
   function eatSpecificFood(food) {
-    const r = state.resources;
     if (!["cookedFish", "cookedMeat", "rawFish", "tomato", "coconut"].includes(food)) return false;
-    if ((r[food] || 0) <= 0) return false;
-    r[food]--;
+    if (managedItemCount(food) <= 0) return false;
+    removePlayerItem(food, 1, HOTBAR_SWAP_SLOTS.includes(selected) ? { area: "hotbar", index: selected } : null);
     if (food === "cookedFish") {
       state.player.hunger = clamp(state.player.hunger + 42, 0, 100);
       recoverStamina(22);
@@ -1986,7 +2743,7 @@
       recoverStamina(8);
       toast("Coconut cracked open.");
     }
-    if ((r[food] || 0) <= 0 && selectedFood === food) {
+    if (managedItemCount(food) <= 0 && selectedFood === food) {
       selectedFood = null;
       heldItem = null;
     }
@@ -1996,16 +2753,18 @@
 
   function drinkWater() {
     if (!spendStamina(2)) return;
+    if (hotbar[selected]?.id === "waterFlask") {
+      removePlayerItem("waterFlask", 1, { area: "hotbar", index: selected });
+      if (hotbar[selected]?.id === "empty") setHotbarItem(selected, slot("flask", 1));
+      else addPlayerItem("flask", 1, "hotbar");
+      state.player.thirst = clamp(state.player.thirst + 34, 0, 100);
+      recoverStamina(6);
+      renderHotbar();
+      return toast("Drank clean water. Flask is empty.");
+    }
     const wm = state.structures.find((s) => s.type === "waterMaker" && dist(s, state.player) < 64);
     if (wm) return operateStructure(wm);
-    if (state.resources.coconut > 0) {
-      state.resources.coconut--;
-      state.player.thirst = clamp(state.player.thirst + 15, 0, 100);
-      state.player.hunger = clamp(state.player.hunger + 8, 0, 100);
-      recoverStamina(8);
-      return toast("Coconut water. Nice.");
-    }
-    toast("Find a water maker or coconut.");
+    toast("Fill the empty flask at a water maker.");
   }
 
   function train(stat) {
@@ -2043,6 +2802,12 @@
 
   function hurt(amount, reason) {
     const p = state.player;
+    if (devMode) {
+      p.health = 100;
+      p.hunger = 100;
+      p.thirst = 100;
+      return;
+    }
     if (p.invuln > 0 && amount > 1) return;
     p.health -= amount;
     if (amount > 1) {
@@ -2053,6 +2818,7 @@
       p.health = 0;
       p.alive = false;
       gameStarted = false;
+      publishLocalPeer("leave");
       fallenNameEl.textContent = p.name || playerName;
       document.getElementById("survived").textContent = state.day;
       gameOverEl.hidden = false;
@@ -2060,6 +2826,12 @@
   }
 
   function addRes(name, qty) {
+    if (name === "bandage" || FOOD_ITEMS.includes(name)) {
+      if (!addPlayerItem(name, qty)) toast("Backpack is full.");
+      renderHotbar();
+      renderRecipes();
+      return;
+    }
     state.resources[name] = (state.resources[name] || 0) + qty;
     renderHotbar();
     renderRecipes();
@@ -2244,6 +3016,7 @@
     ctx.save();
     ctx.translate(wreck.x, wreck.y);
     ctx.rotate(wreck.angle);
+    ctx.scale(SHIPWRECK_SCALE, SHIPWRECK_SCALE);
     ctx.fillStyle = "#6f482d";
     roundRect(-112, -42, 224, 84, 28);
     ctx.fill();
@@ -2280,8 +3053,12 @@
 
     for (const loot of wreck.loot) {
       if (loot.dead) continue;
-      ctx.fillStyle = loot.type === "scrap" ? "#a9c3c8" : loot.type === "glass" ? "#9ae9ff" : "#d0ad62";
-      if (loot.type === "rope") {
+      if (loot.type === "scrap") {
+        drawScrapModel(loot.x, loot.y, 0.95);
+      } else if (loot.type === "glass") {
+        drawGlassModel(loot.x, loot.y, 0.95);
+      } else if (loot.type === "rope") {
+        ctx.fillStyle = "#d0ad62";
         ctx.strokeStyle = ctx.fillStyle;
         ctx.lineWidth = 3;
         ctx.beginPath();
@@ -2292,6 +3069,103 @@
         ctx.fill();
       }
     }
+  }
+
+  function drawScrapModel(x = 0, y = 0, scale = 1) {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.scale(scale, scale);
+    ctx.fillStyle = "#879aa1";
+    ctx.beginPath();
+    ctx.moveTo(-13, -8);
+    ctx.lineTo(5, -12);
+    ctx.lineTo(15, -2);
+    ctx.lineTo(8, 10);
+    ctx.lineTo(-9, 8);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = "#c9d8dc";
+    ctx.beginPath();
+    ctx.moveTo(-5, -6);
+    ctx.lineTo(8, -8);
+    ctx.lineTo(11, -2);
+    ctx.lineTo(-2, 1);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = "#52646b";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(-10, 5);
+    ctx.lineTo(8, -7);
+    ctx.moveTo(-5, -8);
+    ctx.lineTo(9, 9);
+    ctx.stroke();
+    ctx.fillStyle = "#415159";
+    circle(-7, 1, 2);
+    circle(7, 3, 2);
+    ctx.restore();
+  }
+
+  function drawGlassModel(x = 0, y = 0, scale = 1) {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.scale(scale, scale);
+    ctx.fillStyle = "rgba(142, 233, 255, 0.72)";
+    ctx.strokeStyle = "rgba(224, 252, 255, 0.92)";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(-8, -13);
+    ctx.lineTo(11, -6);
+    ctx.lineTo(5, 13);
+    ctx.lineTo(-13, 5);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(-4, -8);
+    ctx.lineTo(3, 9);
+    ctx.moveTo(2, -5);
+    ctx.lineTo(9, -2);
+    ctx.stroke();
+    ctx.fillStyle = "rgba(255, 255, 255, 0.72)";
+    ellipse(-3, -5, 4, 2, -0.5);
+    ctx.restore();
+  }
+
+  function drawFlaskModel(x = 0, y = 0, scale = 1, filled = false) {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.scale(scale, scale);
+    ctx.fillStyle = "rgba(214, 248, 255, 0.78)";
+    ctx.strokeStyle = "#e9fbff";
+    ctx.lineWidth = 2;
+    roundRect(-5, -17, 10, 8, 3);
+    ctx.fill();
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(-10, -9);
+    ctx.lineTo(10, -9);
+    ctx.lineTo(15, 13);
+    ctx.quadraticCurveTo(0, 22, -15, 13);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    if (filled) {
+      ctx.fillStyle = "rgba(82, 196, 236, 0.82)";
+      ctx.beginPath();
+      ctx.moveTo(-10, 2);
+      ctx.lineTo(12, 2);
+      ctx.lineTo(15, 13);
+      ctx.quadraticCurveTo(0, 20, -15, 13);
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.fillStyle = "rgba(255, 255, 255, 0.76)";
+    ellipse(-5, -1, 4, 8, -0.25);
+    ctx.fillStyle = "#8f6a3a";
+    roundRect(-6, -23, 12, 6, 2);
+    ctx.fill();
+    ctx.restore();
   }
 
   function drawDebris() {
@@ -2362,6 +3236,16 @@
           ctx.restore();
           continue;
         }
+        if (d.type === "scrap") {
+          drawScrapModel(0, 0, 1);
+          ctx.restore();
+          continue;
+        }
+        if (d.type === "glass") {
+          drawGlassModel(0, 0, 1);
+          ctx.restore();
+          continue;
+        }
         ctx.fillStyle = {
           wood: "#b87942",
           leaves: "#64b957",
@@ -2424,11 +3308,7 @@
         ctx.fillStyle = st.ready ? "#d8fbff" : "#245e6d";
         circle(0, 0, 8);
         if (st.hasGlass || st.ready) {
-          ctx.fillStyle = "rgba(215, 250, 255, 0.72)";
-          roundRect(8, -16, 9, 16, 3);
-          ctx.fill();
-          ctx.fillStyle = st.ready ? "#75d7ff" : "#245e6d";
-          ctx.fillRect(10, st.ready ? -11 : -6, 5, st.ready ? 9 : 4);
+          drawFlaskModel(15, -9, 0.38, st.ready);
         }
         drawMachineProgress(st, 21);
       } else if (st.type === "plantPot") {
@@ -2545,6 +3425,7 @@
 
   function drawAnimals() {
     for (const a of state.animals) {
+      if (a.type === "crocodile" && a.submerged) continue;
       ctx.save();
       ctx.translate(a.x, a.y);
       ctx.rotate(a.wander);
@@ -2697,23 +3578,35 @@
 
   function drawProjectiles() {
     for (const shot of state.projectiles) {
-      if (shot.type !== "cannonball") continue;
       const a = Math.atan2(shot.vy, shot.vx);
       ctx.save();
       ctx.translate(shot.x, shot.y);
       ctx.rotate(a);
-      ctx.fillStyle = "rgba(5, 16, 22, 0.22)";
-      ellipse(-8, 6, 13, 5, 0);
-      ctx.fillStyle = "#282b31";
-      circle(0, 0, 7);
-      ctx.fillStyle = "#4d525b";
-      circle(-2, -2, 2.4);
-      ctx.strokeStyle = "rgba(244, 231, 190, 0.38)";
-      ctx.lineWidth = 3;
-      ctx.beginPath();
-      ctx.moveTo(-8, 0);
-      ctx.lineTo(-28, 0);
-      ctx.stroke();
+      if (shot.type === "musketBall") {
+        ctx.fillStyle = "rgba(5, 16, 22, 0.22)";
+        ellipse(-5, 4, 8, 3, 0);
+        ctx.fillStyle = "#30353a";
+        circle(0, 0, 3.6);
+        ctx.strokeStyle = "rgba(255, 232, 175, 0.32)";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(-5, 0);
+        ctx.lineTo(-22, 0);
+        ctx.stroke();
+      } else if (shot.type === "cannonball") {
+        ctx.fillStyle = "rgba(5, 16, 22, 0.22)";
+        ellipse(-8, 6, 13, 5, 0);
+        ctx.fillStyle = "#282b31";
+        circle(0, 0, 7);
+        ctx.fillStyle = "#4d525b";
+        circle(-2, -2, 2.4);
+        ctx.strokeStyle = "rgba(244, 231, 190, 0.38)";
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(-8, 0);
+        ctx.lineTo(-28, 0);
+        ctx.stroke();
+      }
       ctx.restore();
     }
   }
@@ -2777,17 +3670,16 @@
     circle(26 + rightReach, 16, 4.6);
     if (buildMode) {
       drawHeldBuildItem();
-    } else if (item === "food") {
-      const food = selectedFood || availableFoods()[0];
-      if (food) drawHeldResourceItem(food);
     } else if (hotbarResource(item) || availableFoods().includes(item)) {
       drawHeldResourceItem(item);
-    } else if (item === "spear") {
-      drawHeldSpear();
-    } else if (item === "axe") {
-      drawHeldAxe();
-    } else if (item === "hammer") {
-      drawHeldHammer();
+    } else if (item === "spear" || item === "metalSpear") {
+      drawHeldSpear(item === "metalSpear");
+    } else if (item === "axe" || item === "metalAxe") {
+      drawHeldAxe(item === "metalAxe");
+    } else if (item === "hammer" || item === "metalHammer") {
+      drawHeldHammer(item === "metalHammer");
+    } else if (item === "musket") {
+      drawHeldMusket();
     } else if (item === "oar") {
       ctx.save();
       ctx.translate(16, 0);
@@ -2818,70 +3710,109 @@
     return p <= 0 ? 0 : Math.sin(p * Math.PI);
   }
 
-  function drawHeldSpear() {
+  function drawHeldSpear(metal = false) {
     const jab = swingCurve("spear") * 26;
     ctx.save();
     ctx.translate(jab, 0);
-    ctx.strokeStyle = "#d4bd82";
-    ctx.lineWidth = 4;
+    ctx.strokeStyle = metal ? "#99a9af" : "#d4bd82";
+    ctx.lineWidth = metal ? 5 : 4;
     ctx.beginPath();
     ctx.moveTo(8, -8);
-    ctx.lineTo(58, -8);
+    ctx.lineTo(metal ? 66 : 58, -8);
     ctx.stroke();
-    ctx.fillStyle = "#b7ccd0";
+    ctx.fillStyle = metal ? "#e7eef0" : "#b7ccd0";
     ctx.beginPath();
-    ctx.moveTo(68, -8);
-    ctx.lineTo(55, -15);
-    ctx.lineTo(55, -1);
+    ctx.moveTo(metal ? 78 : 68, -8);
+    ctx.lineTo(metal ? 62 : 55, metal ? -17 : -15);
+    ctx.lineTo(metal ? 62 : 55, metal ? 1 : -1);
     ctx.closePath();
     ctx.fill();
     ctx.restore();
   }
 
-  function drawHeldAxe() {
+  function drawHeldAxe(metal = false) {
     const swing = swingCurve("axe");
     ctx.save();
     ctx.translate(15, -4);
     ctx.rotate(-0.55 + swing * 1.55);
-    ctx.strokeStyle = "#8b5b35";
+    ctx.strokeStyle = metal ? "#5e6b70" : "#8b5b35";
     ctx.lineWidth = 5;
     ctx.beginPath();
     ctx.moveTo(-4, 8);
     ctx.lineTo(39, -8);
     ctx.stroke();
-    ctx.fillStyle = "#c3d1d6";
-    roundRect(34, -18, 16, 18, 4);
+    ctx.fillStyle = metal ? "#8fa0a7" : "#c3d1d6";
+    roundRect(32, -20, metal ? 20 : 16, 21, 4);
     ctx.fill();
-    ctx.fillStyle = "#eef6f8";
+    ctx.fillStyle = metal ? "#eef7f9" : "#eef6f8";
     ctx.beginPath();
-    ctx.moveTo(47, -19);
-    ctx.lineTo(58, -11);
-    ctx.lineTo(48, -2);
+    ctx.moveTo(metal ? 50 : 47, metal ? -22 : -19);
+    ctx.lineTo(metal ? 64 : 58, -11);
+    ctx.lineTo(metal ? 50 : 48, metal ? 0 : -2);
     ctx.closePath();
     ctx.fill();
     ctx.restore();
   }
 
-  function drawHeldHammer() {
+  function drawHeldHammer(metal = false) {
     const swing = swingCurve("hammer");
     ctx.save();
     ctx.translate(15, 4);
     ctx.rotate(0.5 - swing * 1.45);
-    ctx.strokeStyle = "#7a5133";
+    ctx.strokeStyle = metal ? "#617178" : "#7a5133";
     ctx.lineWidth = 5;
     ctx.beginPath();
     ctx.moveTo(-3, -6);
     ctx.lineTo(38, 9);
     ctx.stroke();
-    ctx.fillStyle = "#9aaab0";
-    roundRect(33, 0, 24, 14, 4);
+    ctx.fillStyle = metal ? "#798b93" : "#9aaab0";
+    roundRect(32, -1, metal ? 30 : 24, metal ? 16 : 14, 4);
     ctx.fill();
     ctx.fillStyle = "#cad5d8";
-    ctx.fillRect(38, 1, 5, 12);
+    ctx.fillRect(38, 1, 5, metal ? 13 : 12);
+    ctx.restore();
+  }
+
+  function drawHeldMusket() {
+    ctx.save();
+    ctx.translate(18, 0);
+    ctx.strokeStyle = "#6b4328";
+    ctx.lineWidth = 6;
+    ctx.beginPath();
+    ctx.moveTo(-10, 5);
+    ctx.lineTo(60, -2);
+    ctx.stroke();
+    ctx.strokeStyle = "#4d555b";
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.moveTo(16, -4);
+    ctx.lineTo(72, -8);
+    ctx.stroke();
+    ctx.fillStyle = "#2d3238";
+    roundRect(28, -8, 12, 7, 2);
+    ctx.fill();
+    ctx.fillStyle = musketCooldown > 0 ? "#ffbb66" : "#dbe6e8";
+    circle(73, -8, 3);
+    if (musketCooldown > 0) {
+      ctx.fillStyle = "rgba(0,0,0,0.45)";
+      roundRect(5, 12, 48, 5, 3);
+      ctx.fill();
+      ctx.fillStyle = "#ffbb66";
+      roundRect(5, 12, 48 * (1 - musketCooldown / 7), 5, 3);
+      ctx.fill();
+    }
     ctx.restore();
   }
 
   function drawHeldBuildItem() {
+    if (!isBuildRecipe(buildChoice)) {
+      if (buildChoice === "bandage") return drawHeldResourceItem("bandage");
+      if (buildChoice === "flask") return drawHeldResourceItem("flask");
+      if (buildChoice === "spear" || buildChoice === "metalSpear") return drawHeldSpear(buildChoice === "metalSpear");
+      if (buildChoice === "axe" || buildChoice === "metalAxe") return drawHeldAxe(buildChoice === "metalAxe");
+      if (buildChoice === "hammer" || buildChoice === "metalHammer") return drawHeldHammer(buildChoice === "metalHammer");
+      if (buildChoice === "musket") return drawHeldMusket();
+    }
     ctx.save();
     ctx.translate(34, 0);
     ctx.rotate(buildAngle);
@@ -2927,6 +3858,8 @@
       cloth: "#e4e1cf",
       rope: "#d0ad62",
       glass: "#9ae9ff",
+      flask: "#9ae9ff",
+      waterFlask: "#52c4ec",
       rawFish: "#9bd3e2",
       cookedFish: "#f0a85d",
       sharkMeat: "#d96d70",
@@ -2942,6 +3875,12 @@
       ctx.beginPath();
       ctx.arc(0, 0, 11, 0, TAU);
       ctx.stroke();
+    } else if (name === "scrap") {
+      drawScrapModel(0, 0, 0.82);
+    } else if (name === "glass") {
+      drawGlassModel(0, 0, 0.82);
+    } else if (name === "flask" || name === "waterFlask") {
+      drawFlaskModel(0, 0, 0.72, name === "waterFlask");
     } else if (name === "coconut" || name === "tomato") {
       circle(0, 0, 10);
     } else if (name.includes("Fish") || name === "rawFish") {
@@ -3080,7 +4019,15 @@
       wall: "Wall",
       torch: "Torch",
       cannon: "Cannon",
+      flask: "Empty Water Flask",
+      waterFlask: "Filled Water Flask",
+      metalAxe: "Metal Axe",
+      metalSpear: "Metal Spear",
+      metalHammer: "Metal Hammer",
+      musket: "Musket",
       sharkMeat: "Raw Shark Meat",
+      rawFish: "Raw Fish",
+      cookedFish: "Cooked Fish",
       meat: "Raw Meat",
       cookedMeat: "Cooked Meat"
     }[s] || cap(s);
