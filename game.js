@@ -22,6 +22,7 @@
   const scoreboardListEl = document.getElementById("scoreboard-list");
   const startScreenEl = document.getElementById("start-screen");
   const usernameEl = document.getElementById("username");
+  const accessTokenEl = document.getElementById("access-token");
   const startButtonEl = document.getElementById("start-button");
   const gameOverEl = document.getElementById("game-over");
   const fallenNameEl = document.getElementById("fallen-name");
@@ -43,7 +44,7 @@
   const SHARK_HP = 120;
   const SHARK_BITE_DAMAGE = 36;
   const SHARK_RAFT_DAMAGE = 30;
-  const SHARK_AGGRESSION_CHANCE = 0.2;
+  const SHARK_AGGRESSION_CHANCE = 0.1;
   const CROCODILE_DAMAGE = 27;
   const PLAYER_INV_CAP = 20;
   const CHEST_INV_CAP = 40;
@@ -134,11 +135,14 @@
   let scoreboardRows = [];
   let remotePlayers = [];
   let serverAggressiveSharks = [];
+  let remoteWorlds = new Map();
   let activeCannon = null;
   let musketCooldown = 0;
   let openChest = null;
   let dragSlotRef = null;
   let serverSyncInFlight = false;
+  let nextServerObjectId = 1;
+  let pendingRemoteRaftMoves = new Map();
   let localChannel = null;
   let usingLocalMultiplayer = false;
   let localPeerId = `local-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -205,7 +209,7 @@
       camera: { x: player.x, y: player.y },
       raftOffset: { x: player.x - TILE * 0.5, y: player.y - TILE * 0.5 },
       sharks: createSharks(player),
-      crocTimer: rnd(18, 35),
+      crocTimer: rnd(90, 170),
       messages: [],
       day: 1
     };
@@ -399,8 +403,8 @@
   resize();
 
   window.addEventListener("keydown", (e) => {
-    const typingName = e.target === usernameEl;
-    if (typingName && e.code !== "Enter") return;
+    const typingStartField = e.target === usernameEl || e.target === accessTokenEl;
+    if (typingStartField && e.code !== "Enter") return;
     if (["KeyW", "KeyA", "KeyS", "KeyD", "ShiftLeft", "ShiftRight", "Space"].includes(e.code)) e.preventDefault();
     keys.add(e.code);
     const idx = ["Digit1", "Digit2", "Digit3", "Digit4", "Digit5", "Digit6", "Digit7", "Digit8", "Digit9", "Digit0"].indexOf(e.code);
@@ -455,11 +459,16 @@
   usernameEl.addEventListener("keydown", (e) => {
     if (e.key === "Enter") startGame();
   });
+  if (accessTokenEl) {
+    accessTokenEl.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") startGame();
+    });
+  }
   window.addEventListener("beforeunload", () => publishLocalPeer("leave"));
 
   function startGame() {
     const rawName = usernameEl.value.trim();
-    devMode = rawName === DEV_TOKEN;
+    devMode = (accessTokenEl?.value || "").trim() === DEV_TOKEN;
     playerName = cleanName(rawName);
     const fresh = createWorld();
     Object.keys(state).forEach((k) => delete state[k]);
@@ -488,6 +497,8 @@
     serverSyncInFlight = false;
     localPeers.clear();
     serverAggressiveSharks = [];
+    remoteWorlds.clear();
+    pendingRemoteRaftMoves.clear();
     selected = 0;
     keys.clear();
     mouse.down = false;
@@ -506,6 +517,7 @@
     gameOverEl.hidden = true;
     startScreenEl.hidden = false;
     usernameEl.value = playerName;
+    if (accessTokenEl) accessTokenEl.value = "";
     usernameEl.focus();
   }
 
@@ -1017,8 +1029,61 @@
       xp: state.player.totalXp || 0,
       health: state.player.health,
       stamina: state.player.stamina,
-      selectedItem: buildMode ? buildChoice : hotbar[selected]?.id || "empty"
+      onIsland: Boolean(isOnIsland(state.player)),
+      onRaft: Boolean(isOnRaft(state.player)),
+      selectedItem: buildMode ? buildChoice : hotbar[selected]?.id || "empty",
+      world: serializeServerWorld(),
+      raftCommands: consumeRemoteRaftMoves()
     };
+  }
+
+  function serializeServerWorld() {
+    return {
+      raftOffset: { x: state.raftOffset.x, y: state.raftOffset.y },
+      raft: state.raft.map((rt) => ({ gx: rt.gx, gy: rt.gy, hp: rt.hp, maxHp: rt.maxHp })),
+      structures: state.structures.map((st) => ({
+        id: serverObjectId("st", st),
+        type: st.type,
+        x: st.x,
+        y: st.y,
+        angle: st.angle || 0,
+        base: st.base || "raft",
+        hp: st.hp,
+        maxHp: st.maxHp,
+        storage: st.type === "chest" ? chestSlots(st) : null
+      })),
+      animals: state.animals.map((a) => ({
+        id: serverObjectId("animal", a),
+        type: a.type,
+        x: a.x,
+        y: a.y,
+        hp: a.hp,
+        submerged: Boolean(a.submerged)
+      })),
+      inventory: inventorySlots(),
+      hotbar: hotbar.map((item) => normalizeSlot(item)),
+      resources: { ...state.resources }
+    };
+  }
+
+  function serverObjectId(prefix, obj) {
+    if (!obj.serverObjectId) obj.serverObjectId = `${prefix}-${nextServerObjectId++}`;
+    return obj.serverObjectId;
+  }
+
+  function queueRemoteRaftMove(ownerId, dx, dy) {
+    const existing = pendingRemoteRaftMoves.get(ownerId) || { ownerId, dx: 0, dy: 0 };
+    existing.dx += dx;
+    existing.dy += dy;
+    pendingRemoteRaftMoves.set(ownerId, existing);
+  }
+
+  function consumeRemoteRaftMoves() {
+    const moves = [...pendingRemoteRaftMoves.values()]
+      .filter((move) => Math.hypot(move.dx, move.dy) > 0.01)
+      .map((move) => ({ ownerId: move.ownerId, dx: move.dx, dy: move.dy }));
+    pendingRemoteRaftMoves.clear();
+    return moves;
   }
 
   async function serverPost(path, body) {
@@ -1043,6 +1108,7 @@
     scoreboardRows = [local];
     remotePlayers = [];
     serverAggressiveSharks = [];
+    remoteWorlds.clear();
     serverPlayerId = null;
     usingLocalMultiplayer = false;
     renderScoreboard();
@@ -1053,6 +1119,7 @@
       localPeers.clear();
       applyServerPlayerState((data.players || []).find((p) => p.id === serverPlayerId));
       remotePlayers = (data.players || []).filter((p) => p.id !== serverPlayerId);
+      applyRemoteWorlds(data.worlds || {}, serverPlayerId);
       serverAggressiveSharks = data.serverSharks || [];
       applyServerSharks(serverAggressiveSharks);
       scoreboardRows = data.scoreboard || [playerNetState(serverPlayerId)];
@@ -1081,6 +1148,7 @@
       applyServerPlayerState((data.players || []).find((p) => p.id === serverPlayerId));
       scoreboardRows = data.scoreboard || [playerNetState(serverPlayerId)];
       remotePlayers = (data.players || []).filter((p) => p.id !== serverPlayerId);
+      applyRemoteWorlds(data.worlds || {}, serverPlayerId);
       serverAggressiveSharks = data.serverSharks || [];
       applyServerSharks(serverAggressiveSharks);
       renderScoreboard();
@@ -1166,7 +1234,40 @@
     const peers = [...localPeers.values()].filter((p) => p.health > 0);
     scoreboardRows = [local, ...peers];
     remotePlayers = peers;
+    applyRemoteWorlds(Object.fromEntries(peers.filter((peer) => peer.world).map((peer) => [peer.id, peer.world])), localPeerId);
     renderScoreboard();
+  }
+
+  function applyRemoteWorlds(worlds, selfId) {
+    remoteWorlds.clear();
+    for (const [ownerId, world] of Object.entries(worlds || {})) {
+      if (!world || ownerId === selfId) continue;
+      if (!Array.isArray(world.raft) || !world.raftOffset) continue;
+      remoteWorlds.set(ownerId, normalizeRemoteWorld(world));
+    }
+  }
+
+  function normalizeRemoteWorld(world) {
+    return {
+      raftOffset: {
+        x: cleanCoord(world.raftOffset?.x, 0),
+        y: cleanCoord(world.raftOffset?.y, 0)
+      },
+      raft: (world.raft || []).map((rt) => ({
+        gx: Math.floor(cleanCoord(rt.gx, 0)),
+        gy: Math.floor(cleanCoord(rt.gy, 0)),
+        hp: clamp(cleanCoord(rt.hp, blockHp.deck), 0, 500),
+        maxHp: clamp(cleanCoord(rt.maxHp, blockHp.deck), 1, 500)
+      })),
+      structures: (world.structures || []).map((st) => ({
+        ...st,
+        x: cleanCoord(st.x, 0),
+        y: cleanCoord(st.y, 0),
+        angle: cleanCoord(st.angle, 0),
+        hp: clamp(cleanCoord(st.hp, blockHp[st.type] || 80), 0, 600),
+        maxHp: clamp(cleanCoord(st.maxHp, blockHp[st.type] || 80), 1, 600)
+      }))
+    };
   }
 
   function applyServerSharks(sharks) {
@@ -1182,9 +1283,9 @@
       shark.serverId = serverShark.id;
       shark.serverControlled = true;
       shark.serverTargetId = serverShark.targetId || null;
-      shark.x = cleanCoord(serverShark.x, shark.x);
-      shark.y = cleanCoord(serverShark.y, shark.y);
-      shark.wander = cleanCoord(serverShark.facing, shark.wander);
+      shark.serverX = cleanCoord(serverShark.x, shark.x);
+      shark.serverY = cleanCoord(serverShark.y, shark.y);
+      shark.serverFacing = cleanCoord(serverShark.facing, shark.wander);
       shark.aggressive = true;
       shark.aggro = 99;
       shark.flee = 0;
@@ -1320,18 +1421,20 @@
     if (mx || my) p.facing = Math.atan2(my, mx);
     p.stamina = clamp(p.stamina + (sprinting && (mx || my) ? -28 : 8 + p.agility * 0.6) * dt, 0, 100);
 
-    if (isOnRaft(p) && hotbar[selected].id === "oar" && mouse.down) {
+    const boardedRaft = raftBoardingAt(p);
+    if (boardedRaft && hotbar[selected].id === "oar" && mouse.down) {
       if (!spendStamina(0.18, false)) {
         rowingTimer = Math.max(0, rowingTimer - dt * 7);
       } else {
-      const a = angleTo(screenCenterWorld(), mouseWorld());
-      const dx = Math.cos(a) * 72 * dt;
-      const dy = Math.sin(a) * 72 * dt;
-      if (moveRaft(dx, dy)) {
-        p.x += dx;
-        p.y += dy;
-        rowingTimer += dt * 9;
-      }
+        const a = angleTo(screenCenterWorld(), mouseWorld());
+        const dx = Math.cos(a) * 72 * dt;
+        const dy = Math.sin(a) * 72 * dt;
+        const moved = boardedRaft.local ? moveRaft(dx, dy) : moveRemoteRaft(boardedRaft, dx, dy);
+        if (moved) {
+          p.x += dx;
+          p.y += dy;
+          rowingTimer += dt * 9;
+        }
       }
     } else {
       rowingTimer = Math.max(0, rowingTimer - dt * 7);
@@ -1369,10 +1472,7 @@
   }
 
   function isOnRaft(p) {
-    return state.raft.some((rt) => {
-      const r = raftTileRect(rt);
-      return p.x > r.x && p.x < r.x + TILE && p.y > r.y && p.y < r.y + TILE;
-    });
+    return Boolean(raftAt(p.x, p.y) || remoteRaftAt(p.x, p.y));
   }
 
   function isOnIsland(p) {
@@ -1386,6 +1486,33 @@
       w: TILE,
       h: TILE
     };
+  }
+
+  function remoteRaftTileRect(world, rt) {
+    return {
+      x: world.raftOffset.x + rt.gx * TILE,
+      y: world.raftOffset.y + rt.gy * TILE,
+      w: TILE,
+      h: TILE
+    };
+  }
+
+  function raftBoardingAt(p) {
+    const local = raftAt(p.x, p.y);
+    if (local) return { local: true, tile: local };
+    return remoteRaftAt(p.x, p.y);
+  }
+
+  function remoteRaftAt(x, y) {
+    for (const [ownerId, world] of remoteWorlds) {
+      for (const rt of world.raft || []) {
+        const r = remoteRaftTileRect(world, rt);
+        if (x > r.x && x < r.x + r.w && y > r.y && y < r.y + r.h) {
+          return { local: false, ownerId, world, tile: rt };
+        }
+      }
+    }
+    return null;
   }
 
   function moveRaft(dx, dy) {
@@ -1404,9 +1531,40 @@
     return true;
   }
 
+  function moveRemoteRaft(boarded, dx, dy) {
+    if (!boarded?.world || remoteRaftWouldHitIsland(boarded.world, dx, dy)) {
+      toast("The raft scrapes the island shore.");
+      return false;
+    }
+    boarded.world.raftOffset.x += dx;
+    boarded.world.raftOffset.y += dy;
+    for (const st of boarded.world.structures || []) {
+      if (st.base === "raft") {
+        st.x += dx;
+        st.y += dy;
+      }
+    }
+    queueRemoteRaftMove(boarded.ownerId, dx, dy);
+    return true;
+  }
+
   function raftWouldHitIsland(dx, dy) {
     for (const rt of state.raft) {
       const r = raftTileRect(rt);
+      const corners = [
+        { x: r.x + dx + 6, y: r.y + dy + 6 },
+        { x: r.x + r.w + dx - 6, y: r.y + dy + 6 },
+        { x: r.x + dx + 6, y: r.y + r.h + dy - 6 },
+        { x: r.x + r.w + dx - 6, y: r.y + r.h + dy - 6 }
+      ];
+      if (corners.some((pt) => state.islands.some((island) => Math.hypot(pt.x - island.x, pt.y - island.y) < island.r + 8))) return true;
+    }
+    return false;
+  }
+
+  function remoteRaftWouldHitIsland(world, dx, dy) {
+    for (const rt of world.raft || []) {
+      const r = remoteRaftTileRect(world, rt);
       const corners = [
         { x: r.x + dx + 6, y: r.y + dy + 6 },
         { x: r.x + r.w + dx - 6, y: r.y + dy + 6 },
@@ -1622,9 +1780,22 @@
       const target = aggro ? sharkTarget(s, land) : null;
       let a = target ? (s.flee > 0 ? angleTo(target, s) : angleTo(s, target)) : s.wander;
       a = steerAroundIslands(s, a);
-      const spd = s.flee > 0 ? 125 : aggro ? 105 : 42;
+      if (s.serverControlled && Number.isFinite(s.serverX) && Number.isFinite(s.serverY)) {
+        const serverAim = angleTo(s, { x: s.serverX, y: s.serverY });
+        a += shortAngle(serverAim - a) * 0.55;
+      }
+      const spd = s.serverControlled ? 112 : s.flee > 0 ? 125 : aggro ? 105 : 42;
       s.x += Math.cos(a) * spd * dt;
       s.y += Math.sin(a) * spd * dt;
+      if (s.serverControlled && Number.isFinite(s.serverX) && Number.isFinite(s.serverY)) {
+        const gapToServer = Math.hypot(s.serverX - s.x, s.serverY - s.y);
+        const pull = clamp(dt * (gapToServer > 420 ? 1.8 : 0.55), 0, 0.28);
+        s.x += (s.serverX - s.x) * pull;
+        s.y += (s.serverY - s.y) * pull;
+        s.wander = Number.isFinite(s.serverFacing) ? s.serverFacing : a;
+      } else {
+        s.wander = a;
+      }
       for (const other of state.sharks) {
         if (other === s) continue;
         const gap = dist(s, other);
@@ -1653,11 +1824,13 @@
   function sharkTarget(shark, localLand) {
     const targetId = shark.serverTargetId;
     if (targetId) {
-      if (targetId === serverPlayerId || targetId === localPeerId) return localLand ? sharkWaterPoint(localLand, shark) : state.player;
+      if (targetId === serverPlayerId || targetId === localPeerId) return localLand ? sharkRetreatPoint(localLand, shark) : state.player;
       const remote = remotePlayers.find((player) => player.id === targetId && player.health > 0);
       if (remote) return remote;
     }
-    return localLand ? sharkWaterPoint(localLand, shark) : state.player;
+    if (localLand) return sharkRetreatPoint(localLand, shark);
+    if (shark.serverControlled && !targetId) return null;
+    return state.player;
   }
 
   function islandAt(p) {
@@ -1669,6 +1842,14 @@
     return {
       x: island.x + Math.cos(a) * (island.r + 90),
       y: island.y + Math.sin(a) * (island.r + 90)
+    };
+  }
+
+  function sharkRetreatPoint(island, s) {
+    const a = angleTo(island, s);
+    return {
+      x: island.x + Math.cos(a) * (island.r + 460),
+      y: island.y + Math.sin(a) * (island.r + 460)
     };
   }
 
@@ -1992,11 +2173,11 @@
       state.crocTimer -= dt;
       if (state.crocTimer <= 0) {
         const crocsHere = state.animals.filter((a) => a.type === "crocodile" && a.homeIsland === playerIsland && !a.dead).length;
-        if (crocsHere < 2) {
+        if (crocsHere < 1 && Math.random() < 0.42) {
           state.animals.push(animal("crocodile", waterPointAroundIsland(playerIsland, rnd(34, 76)), playerIsland));
           toast("A crocodile is swimming in from the shore.");
         }
-        state.crocTimer = rnd(35, 60);
+        state.crocTimer = rnd(100, 210);
       }
     } else {
       state.crocTimer = Math.max(10, state.crocTimer);
@@ -2915,6 +3096,7 @@
     drawIslands();
     drawDebris();
     drawShark();
+    drawRemoteRafts();
     drawRaft();
     drawStructures();
     drawCast();
@@ -3264,19 +3446,62 @@
   function drawRaft() {
     for (const rt of state.raft) {
       const r = raftTileRect(rt);
-      ctx.fillStyle = "#b97538";
-      roundRect(r.x + 2, r.y + 2, TILE - 4, TILE - 4, 5);
-      ctx.fill();
-      ctx.fillStyle = "rgba(89,49,25,0.32)";
-      ctx.fillRect(r.x + 7, r.y + 8, TILE - 14, 5);
-      ctx.fillRect(r.x + 7, r.y + 22, TILE - 14, 5);
-      ctx.fillRect(r.x + 7, r.y + 36, TILE - 14, 5);
-      ctx.strokeStyle = rt.hp < 35 ? "#ff7482" : "rgba(255,255,255,0.16)";
-      ctx.lineWidth = 2;
-      roundRect(r.x + 2, r.y + 2, TILE - 4, TILE - 4, 5);
-      ctx.stroke();
+      drawRaftTile(r, rt, "#b97538", "rgba(89,49,25,0.32)", 1);
       if (rt.hp < rt.maxHp) healthBar(r.x + TILE / 2, r.y - 8, rt.hp / rt.maxHp, 38);
     }
+  }
+
+  function drawRemoteRafts() {
+    for (const [ownerId, world] of remoteWorlds) {
+      ctx.save();
+      ctx.globalAlpha = 0.78;
+      for (const rt of world.raft || []) {
+        drawRaftTile(remoteRaftTileRect(world, rt), rt, "#9d8051", "rgba(40,56,61,0.28)", 0.78);
+      }
+      for (const st of world.structures || []) drawRemoteStructure(st);
+      ctx.restore();
+      const owner = remotePlayers.find((player) => player.id === ownerId);
+      if (owner && world.raft?.length) {
+        const first = remoteRaftTileRect(world, world.raft[0]);
+        ctx.fillStyle = "rgba(5, 16, 22, 0.58)";
+        roundRect(first.x - 4, first.y - 24, 92, 16, 6);
+        ctx.fill();
+        ctx.fillStyle = "#e9f9fb";
+        ctx.font = "800 10px system-ui, sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillText(`${owner.name || "Player"}'s raft`, first.x + 42, first.y - 13);
+      }
+    }
+  }
+
+  function drawRaftTile(r, rt, fill, plank, alpha = 1) {
+    ctx.save();
+    ctx.globalAlpha *= alpha;
+    ctx.fillStyle = fill;
+    roundRect(r.x + 2, r.y + 2, TILE - 4, TILE - 4, 5);
+    ctx.fill();
+    ctx.fillStyle = plank;
+    ctx.fillRect(r.x + 7, r.y + 8, TILE - 14, 5);
+    ctx.fillRect(r.x + 7, r.y + 22, TILE - 14, 5);
+    ctx.fillRect(r.x + 7, r.y + 36, TILE - 14, 5);
+    ctx.strokeStyle = rt.hp < 35 ? "#ff7482" : "rgba(255,255,255,0.16)";
+    ctx.lineWidth = 2;
+    roundRect(r.x + 2, r.y + 2, TILE - 4, TILE - 4, 5);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawRemoteStructure(st) {
+    const f = footprint(st.type);
+    ctx.save();
+    ctx.translate(st.x, st.y);
+    ctx.rotate(st.angle || 0);
+    ctx.fillStyle = st.type === "wall" ? "#77613f" : st.type === "torch" ? "#bb8b43" : st.type === "cannon" ? "#535c63" : st.type === "waterMaker" ? "#578b94" : "#735238";
+    roundRect(-f.w / 2, -f.h / 2, f.w, f.h, st.type === "wall" ? f.h / 2 : 5);
+    ctx.fill();
+    ctx.strokeStyle = "rgba(255,255,255,0.2)";
+    ctx.stroke();
+    ctx.restore();
   }
 
   function drawStructures() {
@@ -3946,6 +4171,13 @@
     for (const rt of state.raft) {
       const r = raftTileRect(rt);
       mctx.fillRect(r.x * scale, r.y * scale, Math.max(1, TILE * scale), Math.max(1, TILE * scale));
+    }
+    mctx.fillStyle = "#d2b783";
+    for (const world of remoteWorlds.values()) {
+      for (const rt of world.raft || []) {
+        const r = remoteRaftTileRect(world, rt);
+        mctx.fillRect(r.x * scale, r.y * scale, Math.max(1, TILE * scale), Math.max(1, TILE * scale));
+      }
     }
     for (const shark of state.sharks) {
       mctx.fillStyle = shark.aggressive || shark.aggro > 0 ? "#ff6576" : "#2f454f";
