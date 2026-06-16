@@ -51,13 +51,26 @@
   const DEV_TOKEN = "GoldDigger";
   const DEV_RESOURCE_AMOUNT = 9999;
   const FOOD_ITEMS = ["cookedFish", "cookedMeat", "rawFish", "tomato", "coconut"];
-  const TOOL_ITEMS = ["rod", "oar", "axe", "spear", "hammer", "metalAxe", "metalSpear", "metalHammer", "musket"];
+  const TIER_ORDER = ["wood", "scrap", "iron", "steel"];
+  const TOOL_BASES = ["axe", "spear", "hammer"];
+  const TOOL_TIERS = {
+    wood: { name: "Wood", durability: 100, power: 1, color: "#d4bd82" },
+    scrap: { name: "Scrap", durability: 200, power: 1.25, color: "#a8b5ba" },
+    iron: { name: "Iron", durability: 350, power: 1.6, color: "#d6dde0" },
+    steel: { name: "Steel", durability: 500, power: 2, color: "#e7f3f5" }
+  };
+  const TIERED_TOOL_IDS = TIER_ORDER.flatMap((tier) => TOOL_BASES.map((base) => `${tier}${capBase(base)}`));
+  const SINGLE_TIER_TOOLS = ["rod", "oar", "musket"];
+  const TOOL_ITEMS = [...SINGLE_TIER_TOOLS, ...TIERED_TOOL_IDS, "axe", "spear", "hammer", "metalAxe", "metalSpear", "metalHammer"];
   const HOTBAR_SWAP_SLOTS = Array.from({ length: 10 }, (_, i) => i);
   const rnd = (a, b) => a + Math.random() * (b - a);
   const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
   const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
   const angleTo = (a, b) => Math.atan2(b.y - a.y, b.x - a.x);
   const now = () => performance.now() / 1000;
+  function capBase(s) {
+    return s.charAt(0).toUpperCase() + s.slice(1);
+  }
 
   const recipes = {
     raft: { wood: 6, rope: 2 },
@@ -70,10 +83,20 @@
     cannon: { wood: 10, scrap: 8, rope: 2 },
     bandage: { cloth: 2, leaves: 3 },
     flask: { glass: 1, rope: 1 },
-    spear: { wood: 6, scrap: 3, rope: 2 },
-    metalAxe: { wood: 5, scrap: 9, rope: 2 },
-    metalSpear: { wood: 5, scrap: 11, rope: 3 },
-    metalHammer: { wood: 7, scrap: 10, cloth: 2 },
+    rod: { wood: 4, rope: 2 },
+    oar: { wood: 6, rope: 2 },
+    woodAxe: { wood: 5, rope: 1 },
+    scrapAxe: { wood: 4, scrap: 8, rope: 2 },
+    ironAxe: { wood: 5, scrap: 6, iron: 8, rope: 2 },
+    steelAxe: { wood: 6, iron: 6, steel: 8, rope: 3 },
+    woodSpear: { wood: 6, rope: 2 },
+    scrapSpear: { wood: 5, scrap: 10, rope: 3 },
+    ironSpear: { wood: 5, scrap: 7, iron: 10, rope: 3 },
+    steelSpear: { wood: 6, iron: 7, steel: 10, rope: 4 },
+    woodHammer: { wood: 6, rope: 1 },
+    scrapHammer: { wood: 5, scrap: 8, cloth: 2 },
+    ironHammer: { wood: 6, scrap: 6, iron: 7, cloth: 2 },
+    steelHammer: { wood: 7, iron: 5, steel: 7, cloth: 3 },
     musket: { wood: 18, scrap: 26, rope: 6, cloth: 4, glass: 4 }
   };
 
@@ -101,9 +124,9 @@
   const hotbar = [
     { id: "rod", name: "Rod", key: "1", qty: 1, swappable: true },
     { id: "oar", name: "Oar", key: "2", qty: 1, swappable: true },
-    { id: "axe", name: "Axe", key: "3", qty: 1, swappable: true },
-    { id: "spear", name: "Spear", key: "4", qty: 1, swappable: true },
-    { id: "hammer", name: "Hammer", key: "5", qty: 1, swappable: true },
+    { id: "woodAxe", name: "Wood Axe", key: "3", qty: 1, swappable: true },
+    { id: "woodSpear", name: "Wood Spear", key: "4", qty: 1, swappable: true },
+    { id: "woodHammer", name: "Wood Hammer", key: "5", qty: 1, swappable: true },
     { id: "bandage", name: "Bandage", key: "6", qty: 1, swappable: true },
     { id: "empty", name: "-", key: "7", swappable: true },
     { id: "empty", name: "-", key: "8", swappable: true },
@@ -126,6 +149,7 @@
   let dayClock = 0;
   let cast = null;
   let rowingTimer = 0;
+  let rowingDurabilityTimer = 0;
   let waveTime = 0;
   let gameStarted = false;
   let playerName = "Captain";
@@ -135,6 +159,7 @@
   let scoreboardRows = [];
   let remotePlayers = [];
   let serverAggressiveSharks = [];
+  let serverProjectiles = [];
   let remoteWorlds = new Map();
   let activeCannon = null;
   let musketCooldown = 0;
@@ -143,6 +168,9 @@
   let serverSyncInFlight = false;
   let nextServerObjectId = 1;
   let pendingRemoteRaftMoves = new Map();
+  let pendingPlayerHits = [];
+  let pendingWorldCommands = [];
+  let pendingProjectileCommands = [];
   let localChannel = null;
   let usingLocalMultiplayer = false;
   let localPeerId = `local-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -194,6 +222,8 @@
         wood: 12,
         leaves: 8,
         scrap: 4,
+        iron: 0,
+        steel: 0,
         cloth: 3,
         rope: 4,
         glass: 1,
@@ -210,6 +240,7 @@
       raftOffset: { x: player.x - TILE * 0.5, y: player.y - TILE * 0.5 },
       sharks: createSharks(player),
       crocTimer: rnd(90, 170),
+      unlocks: { axe: "wood", spear: "wood", hammer: "wood" },
       messages: [],
       day: 1
     };
@@ -219,8 +250,19 @@
     return Array.from({ length: count }, () => null);
   }
 
-  function slot(id, qty = 1) {
-    return id && qty > 0 ? { id, qty } : null;
+  function slot(id, qty = 1, meta = {}) {
+    if (!id || qty <= 0) return null;
+    const spec = toolSpec(id);
+    if (spec?.durability) {
+      const maxDurability = meta.maxDurability || spec.durability;
+      return {
+        id,
+        qty: 1,
+        durability: clamp(meta.durability ?? maxDurability, 0, maxDurability),
+        maxDurability
+      };
+    }
+    return { id, qty };
   }
 
   function startingInventorySlots() {
@@ -232,9 +274,9 @@
   function resetHotbarItems() {
     setHotbarItem(0, slot("rod", 1));
     setHotbarItem(1, slot("oar", 1));
-    setHotbarItem(2, slot("axe", 1));
-    setHotbarItem(3, slot("spear", 1));
-    setHotbarItem(4, slot("hammer", 1));
+    setHotbarItem(2, slot("woodAxe", 1));
+    setHotbarItem(3, slot("woodSpear", 1));
+    setHotbarItem(4, slot("woodHammer", 1));
     setHotbarItem(5, slot("bandage", 1));
     setHotbarItem(6, null);
     setHotbarItem(7, slot("flask", 1));
@@ -349,11 +391,20 @@
       island.shipwreck.loot.push({
         x: p.x + Math.cos(angle + Math.PI / 2) * rnd(-45, 45) * SHIPWRECK_SCALE + Math.cos(angle) * rnd(-60, 35) * SHIPWRECK_SCALE,
         y: p.y + Math.sin(angle + Math.PI / 2) * rnd(-45, 45) * SHIPWRECK_SCALE + Math.sin(angle) * rnd(-60, 35) * SHIPWRECK_SCALE,
-        type: Math.random() < 0.55 ? "scrap" : Math.random() < 0.78 ? "glass" : "rope",
+        type: shipwreckLootType(),
         qty: 1,
         dead: false
       });
     }
+  }
+
+  function shipwreckLootType() {
+    const roll = Math.random();
+    if (roll < 0.46) return "scrap";
+    if (roll < 0.66) return "glass";
+    if (roll < 0.83) return "rope";
+    if (roll < 0.96) return "iron";
+    return "steel";
   }
 
   function animal(type, p, homeIsland = null) {
@@ -529,7 +580,7 @@
     state.player.health = 100;
     state.player.hunger = 100;
     state.player.thirst = 100;
-    for (const key of ["wood", "leaves", "scrap", "cloth", "rope", "glass", "sharkMeat", "meat"]) {
+    for (const key of ["wood", "leaves", "scrap", "iron", "steel", "cloth", "rope", "glass", "sharkMeat", "meat"]) {
       state.resources[key] = DEV_RESOURCE_AMOUNT;
     }
   }
@@ -554,15 +605,9 @@
   }
 
   function itemIcon(id) {
-    return {
+    const icons = {
         rod: "ROD",
         oar: "OAR",
-        axe: "AXE",
-        spear: "SPR",
-        hammer: "HAM",
-        metalAxe: "MAX",
-        metalSpear: "MSP",
-        metalHammer: "MHM",
         musket: "MSK",
         bandage: "BND",
         flask: "EFL",
@@ -581,7 +626,11 @@
         torch: "TOR",
         cannon: "CAN",
         empty: ""
-      }[id] || label(id).slice(0, 3).toUpperCase();
+      };
+    if (icons[id] !== undefined) return icons[id];
+    const spec = toolSpec(id);
+    if (spec && !spec.single) return `${spec.tier.charAt(0).toUpperCase()}${spec.base.slice(0, 2).toUpperCase()}`;
+    return label(id).slice(0, 3).toUpperCase();
   }
 
   function selectHotbarSlot(idx) {
@@ -608,6 +657,7 @@
 
   function hotbarCount(item) {
     if (item.id === "empty") return "";
+    if (isDurableItem(item.id)) return item.durability ?? toolSpec(item.id).durability;
     if (item.id === "bandage") return item.qty || "";
     if (item.id === "flask" || item.id === "waterFlask") return item.qty || "";
     if (FOOD_ITEMS.includes(item.id)) return item.qty || "";
@@ -620,6 +670,70 @@
     return ["bandage", "flask", "waterFlask"].includes(id);
   }
 
+  function canonicalToolId(id) {
+    return {
+      axe: "woodAxe",
+      spear: "woodSpear",
+      hammer: "woodHammer",
+      metalAxe: "scrapAxe",
+      metalSpear: "scrapSpear",
+      metalHammer: "scrapHammer"
+    }[id] || id;
+  }
+
+  function toolSpec(id) {
+    const canonical = canonicalToolId(id);
+    if (SINGLE_TIER_TOOLS.includes(canonical)) {
+      const names = { rod: "Wood Rod", oar: "Wood Oar", musket: "Wood Musket" };
+      return { id: canonical, base: canonical, tier: "wood", label: names[canonical], durability: TOOL_TIERS.wood.durability, power: 1, color: TOOL_TIERS.wood.color, single: true };
+    }
+    const match = /^(wood|scrap|iron|steel)(Axe|Spear|Hammer)$/.exec(canonical);
+    if (!match) return null;
+    const [, tier, baseName] = match;
+    const base = baseName.charAt(0).toLowerCase() + baseName.slice(1);
+    const tierInfo = TOOL_TIERS[tier];
+    return {
+      id: canonical,
+      base,
+      tier,
+      label: `${tierInfo.name} ${capBase(base)}`,
+      durability: tierInfo.durability,
+      power: tierInfo.power,
+      color: tierInfo.color,
+      single: false
+    };
+  }
+
+  function isDurableItem(id) {
+    return Boolean(toolSpec(id));
+  }
+
+  function tierIndex(tier) {
+    return Math.max(0, TIER_ORDER.indexOf(tier));
+  }
+
+  function isTieredToolRecipe(name) {
+    const spec = toolSpec(name);
+    return Boolean(spec && !spec.single && canonicalToolId(name) === name);
+  }
+
+  function recipeVisible(name) {
+    if (!recipes[name]) return false;
+    if (!isTieredToolRecipe(name)) return true;
+    const spec = toolSpec(name);
+    if (spec.tier === "wood") return true;
+    const unlockedTier = state.unlocks?.[spec.base] || "wood";
+    return tierIndex(spec.tier) <= tierIndex(unlockedTier) + 1;
+  }
+
+  function markToolUnlocked(id) {
+    const spec = toolSpec(id);
+    if (!spec || spec.single) return;
+    if (!state.unlocks) state.unlocks = { axe: "wood", spear: "wood", hammer: "wood" };
+    const current = state.unlocks[spec.base] || "wood";
+    if (tierIndex(spec.tier) > tierIndex(current)) state.unlocks[spec.base] = spec.tier;
+  }
+
   function availableFoods() {
     return FOOD_ITEMS.filter((key) => (state.resources[key] || 0) > 0);
   }
@@ -630,7 +744,7 @@
   }
 
   function isToolItem(id) {
-    return TOOL_ITEMS.includes(id);
+    return Boolean(toolSpec(id));
   }
 
   function isInventoryManaged(id) {
@@ -663,7 +777,18 @@
   }
 
   function normalizeSlot(item) {
-    return item && item.id && item.id !== "empty" && item.qty > 0 ? { id: item.id, qty: item.qty } : null;
+    if (!item || !item.id || item.id === "empty" || item.qty <= 0) return null;
+    const spec = toolSpec(item.id);
+    if (spec?.durability) {
+      const maxDurability = clamp(Number(item.maxDurability) || spec.durability, 1, spec.durability);
+      return {
+        id: spec.id,
+        qty: 1,
+        durability: clamp(Number(item.durability) || maxDurability, 0, maxDurability),
+        maxDurability
+      };
+    }
+    return { id: item.id, qty: item.qty };
   }
 
   function countSlots(slots, id) {
@@ -679,10 +804,12 @@
   }
 
   function playerHasInventorySpaceFor(id) {
+    if (isDurableItem(id)) return inventorySlots().some((item) => !item);
     return inventorySlots().some((item) => !item || item.id === id);
   }
 
   function playerHasItemSpaceFor(id) {
+    if (isDurableItem(id)) return playerHasInventorySpaceFor(id) || HOTBAR_SWAP_SLOTS.some((idx) => hotbar[idx].id === "empty");
     return playerHasInventorySpaceFor(id) || HOTBAR_SWAP_SLOTS.some((idx) => hotbar[idx].id === "empty" || hotbar[idx].id === id);
   }
 
@@ -771,7 +898,7 @@
     card.disabled = !canUse;
     card.draggable = Boolean(item && canUse);
     const name = item ? label(item.id) : "Empty";
-    const qty = item?.qty ? `x${item.qty}` : "";
+    const qty = item?.durability !== undefined ? `${item.durability}/${item.maxDurability}` : item?.qty ? `x${item.qty}` : "";
     card.innerHTML = `<kbd>${hotkey || ref.index + 1}</kbd><b>${name}</b><span>${qty}${canUse ? "" : "Locked"}</span>`;
     card.addEventListener("dragstart", (event) => {
       if (!item || !canUse) return;
@@ -819,8 +946,17 @@
     const value = normalizeSlot(item);
     hotbar[index].id = value ? value.id : "empty";
     hotbar[index].name = value ? label(value.id) : "-";
-    if (value) hotbar[index].qty = value.qty;
-    else delete hotbar[index].qty;
+    delete hotbar[index].durability;
+    delete hotbar[index].maxDurability;
+    if (value) {
+      hotbar[index].qty = value.qty;
+      if (value.durability !== undefined) {
+        hotbar[index].durability = value.durability;
+        hotbar[index].maxDurability = value.maxDurability;
+      }
+    } else {
+      delete hotbar[index].qty;
+    }
     return true;
   }
 
@@ -838,6 +974,7 @@
     setSlot(target, sourceItem);
     setSlot(source, targetItem);
     syncManagedCountsFromSlots();
+    if ((source.area === "chest" || target.area === "chest") && openChest?.remoteOwnerId) syncRemoteStructure(openChest);
     if (shouldRender) {
       renderHotbar();
       renderInventory();
@@ -857,6 +994,26 @@
 
   function addPlayerItem(id, qty, preferred = "inventory") {
     if (!isInventoryManaged(id) || qty <= 0) return false;
+    if (isDurableItem(id)) {
+      let remaining = Math.floor(qty);
+      while (remaining > 0) {
+        if (preferred === "hotbar") {
+          const emptyHotbar = HOTBAR_SWAP_SLOTS.find((idx) => hotbar[idx].id === "empty");
+          if (emptyHotbar !== undefined) {
+            setHotbarItem(emptyHotbar, slot(id, 1));
+            remaining--;
+            continue;
+          }
+        }
+        const inv = inventorySlots();
+        const empty = inv.findIndex((item) => !item);
+        if (empty < 0) return remaining < qty;
+        inv[empty] = slot(id, 1);
+        remaining--;
+      }
+      syncManagedCountsFromSlots();
+      return true;
+    }
     const slots = preferred === "hotbar" ? HOTBAR_SWAP_SLOTS.map((idx) => hotbar[idx]) : inventorySlots();
     const stack = slots.find((item) => item?.id === id);
     if (stack) {
@@ -928,7 +1085,7 @@
   function renderRecipeBook() {
     if (!recipeGridEl) return;
     recipeGridEl.innerHTML = "";
-    for (const name of Object.keys(recipes)) {
+    for (const name of Object.keys(recipes).filter(recipeVisible)) {
       const card = document.createElement("button");
       card.className = "recipe-card";
       card.type = "button";
@@ -974,7 +1131,7 @@
   }
 
   function isToolRecipe(name) {
-    return ["spear", "metalAxe", "metalSpear", "metalHammer", "musket"].includes(name);
+    return Boolean(recipes[name] && toolSpec(name));
   }
 
   function isHotbarCraftRecipe(name) {
@@ -990,7 +1147,7 @@
   }
 
   function craftCycleChoices() {
-    return Object.keys(recipes).filter((name) => isBuildRecipe(name) || isCraftOnlyRecipe(name));
+    return Object.keys(recipes).filter((name) => recipeVisible(name) && (isBuildRecipe(name) || isCraftOnlyRecipe(name)));
   }
 
   function canAfford(name) {
@@ -1033,7 +1190,10 @@
       onRaft: Boolean(isOnRaft(state.player)),
       selectedItem: buildMode ? buildChoice : hotbar[selected]?.id || "empty",
       world: serializeServerWorld(),
-      raftCommands: consumeRemoteRaftMoves()
+      raftCommands: consumeRemoteRaftMoves(),
+      playerHits: consumePlayerHits(),
+      worldCommands: consumeWorldCommands(),
+      projectileCommands: consumeProjectileCommands()
     };
   }
 
@@ -1050,6 +1210,7 @@
         base: st.base || "raft",
         hp: st.hp,
         maxHp: st.maxHp,
+        hitbox: footprint(st.type),
         storage: st.type === "chest" ? chestSlots(st) : null
       })),
       animals: state.animals.map((a) => ({
@@ -1058,11 +1219,43 @@
         x: a.x,
         y: a.y,
         hp: a.hp,
+        maxHp: a.maxHp,
         submerged: Boolean(a.submerged)
       })),
+      sharks: state.sharks.map((s) => ({
+        id: serverObjectId("shark", s),
+        x: s.x,
+        y: s.y,
+        hp: s.hp,
+        aggressive: Boolean(s.aggressive),
+        serverControlled: Boolean(s.serverControlled)
+      })),
+      debris: state.debris.map((d) => ({
+        id: serverObjectId("debris", d),
+        type: d.type,
+        x: d.x,
+        y: d.y,
+        vx: d.vx,
+        vy: d.vy,
+        stopped: Boolean(d.stopped),
+        life: d.life
+      })),
+      trees: state.islands.flatMap((island, islandIndex) =>
+        island.trees.map((tree) => ({
+          id: serverObjectId(`tree-${islandIndex}`, tree),
+          islandIndex,
+          x: tree.x,
+          y: tree.y,
+          hp: tree.hp,
+          maxHp: tree.maxHp,
+          dead: Boolean(tree.dead),
+          respawn: tree.respawn || 0
+        }))
+      ),
       inventory: inventorySlots(),
       hotbar: hotbar.map((item) => normalizeSlot(item)),
-      resources: { ...state.resources }
+      resources: { ...state.resources },
+      unlocks: { ...(state.unlocks || {}) }
     };
   }
 
@@ -1084,6 +1277,51 @@
       .map((move) => ({ ownerId: move.ownerId, dx: move.dx, dy: move.dy }));
     pendingRemoteRaftMoves.clear();
     return moves;
+  }
+
+  function queuePlayerHit(targetId, damage) {
+    if (!targetId || !Number.isFinite(damage)) return;
+    pendingPlayerHits.push({ targetId: String(targetId), damage: clamp(Math.round(damage), 1, 120) });
+    if (pendingPlayerHits.length > 24) pendingPlayerHits = pendingPlayerHits.slice(-24);
+  }
+
+  function consumePlayerHits() {
+    const hits = pendingPlayerHits.slice(0, 24);
+    pendingPlayerHits = [];
+    return hits;
+  }
+
+  function queueWorldCommand(ownerId, command) {
+    if (!ownerId || !command) return;
+    pendingWorldCommands.push({ ownerId, ...command });
+    if (pendingWorldCommands.length > 80) pendingWorldCommands = pendingWorldCommands.slice(-80);
+  }
+
+  function consumeWorldCommands() {
+    const commands = pendingWorldCommands.slice(0, 80);
+    pendingWorldCommands = [];
+    return commands;
+  }
+
+  function queueProjectileCommand(projectile) {
+    if (!projectile) return;
+    pendingProjectileCommands.push({
+      type: projectile.type,
+      x: projectile.x,
+      y: projectile.y,
+      vx: projectile.vx,
+      vy: projectile.vy,
+      life: projectile.life,
+      damage: projectile.damage,
+      radius: projectile.radius
+    });
+    if (pendingProjectileCommands.length > 48) pendingProjectileCommands = pendingProjectileCommands.slice(-48);
+  }
+
+  function consumeProjectileCommands() {
+    const commands = pendingProjectileCommands.slice(0, 48);
+    pendingProjectileCommands = [];
+    return commands;
   }
 
   async function serverPost(path, body) {
@@ -1118,10 +1356,12 @@
       usingLocalMultiplayer = false;
       localPeers.clear();
       applyServerPlayerState((data.players || []).find((p) => p.id === serverPlayerId));
+      applyOwnServerWorld(data.worlds?.[serverPlayerId]);
       remotePlayers = (data.players || []).filter((p) => p.id !== serverPlayerId);
       applyRemoteWorlds(data.worlds || {}, serverPlayerId);
       serverAggressiveSharks = data.serverSharks || [];
       applyServerSharks(serverAggressiveSharks);
+      serverProjectiles = data.serverProjectiles || [];
       scoreboardRows = data.scoreboard || [playerNetState(serverPlayerId)];
       renderScoreboard();
     } catch {
@@ -1148,9 +1388,11 @@
       applyServerPlayerState((data.players || []).find((p) => p.id === serverPlayerId));
       scoreboardRows = data.scoreboard || [playerNetState(serverPlayerId)];
       remotePlayers = (data.players || []).filter((p) => p.id !== serverPlayerId);
+      applyOwnServerWorld(data.worlds?.[serverPlayerId]);
       applyRemoteWorlds(data.worlds || {}, serverPlayerId);
       serverAggressiveSharks = data.serverSharks || [];
       applyServerSharks(serverAggressiveSharks);
+      serverProjectiles = data.serverProjectiles || [];
       renderScoreboard();
     } catch {
       serverPlayerId = null;
@@ -1191,6 +1433,7 @@
 
   function receiveLocalPeer(data) {
     if (!data || data.id === localPeerId) return;
+    applyIncomingPlayerHits(data.playerHits, data.name || "Player");
     if (data.type === "leave" || data.health <= 0) {
       localPeers.delete(data.id);
       updateLocalPeerRows();
@@ -1198,6 +1441,15 @@
     }
     localPeers.set(data.id, { ...data, seen: data.seen || Date.now() });
     updateLocalPeerRows();
+  }
+
+  function applyIncomingPlayerHits(hits, attackerName = "Player") {
+    if (!Array.isArray(hits) || !state.player.alive) return;
+    const selfIds = new Set([localPeerId, serverPlayerId].filter(Boolean));
+    for (const hit of hits.slice(0, 12)) {
+      if (!selfIds.has(String(hit?.targetId || ""))) continue;
+      hurt(clamp(Number(hit.damage) || 0, 0, 120), `${attackerName} hit you.`);
+    }
   }
 
   function readLocalStoragePeers() {
@@ -1239,15 +1491,25 @@
   }
 
   function applyRemoteWorlds(worlds, selfId) {
+    const activeRemote = activeCannon?.remoteOwnerId && activeCannon?.id ? { ownerId: activeCannon.remoteOwnerId, id: activeCannon.id } : null;
+    const openRemoteChest = openChest?.remoteOwnerId && openChest?.id ? { ownerId: openChest.remoteOwnerId, id: openChest.id } : null;
     remoteWorlds.clear();
     for (const [ownerId, world] of Object.entries(worlds || {})) {
       if (!world || ownerId === selfId) continue;
       if (!Array.isArray(world.raft) || !world.raftOffset) continue;
-      remoteWorlds.set(ownerId, normalizeRemoteWorld(world));
+      remoteWorlds.set(ownerId, normalizeRemoteWorld(world, ownerId));
+    }
+    if (activeRemote) {
+      const world = remoteWorlds.get(activeRemote.ownerId);
+      activeCannon = (world?.structures || []).find((st) => st.id === activeRemote.id) || null;
+    }
+    if (openRemoteChest) {
+      const world = remoteWorlds.get(openRemoteChest.ownerId);
+      openChest = (world?.structures || []).find((st) => st.id === openRemoteChest.id) || null;
     }
   }
 
-  function normalizeRemoteWorld(world) {
+  function normalizeRemoteWorld(world, ownerId = null) {
     return {
       raftOffset: {
         x: cleanCoord(world.raftOffset?.x, 0),
@@ -1261,13 +1523,40 @@
       })),
       structures: (world.structures || []).map((st) => ({
         ...st,
+        remoteOwnerId: ownerId,
         x: cleanCoord(st.x, 0),
         y: cleanCoord(st.y, 0),
         angle: cleanCoord(st.angle, 0),
         hp: clamp(cleanCoord(st.hp, blockHp[st.type] || 80), 0, 600),
-        maxHp: clamp(cleanCoord(st.maxHp, blockHp[st.type] || 80), 1, 600)
+        maxHp: clamp(cleanCoord(st.maxHp, blockHp[st.type] || 80), 1, 600),
+        timer: clamp(cleanCoord(st.timer, 0), 0, 1200),
+        maxTimer: clamp(cleanCoord(st.maxTimer, 0), 0, 1200),
+        cooldown: clamp(cleanCoord(st.cooldown, 0), 0, 20),
+        ready: Boolean(st.ready),
+        hasGlass: Boolean(st.hasGlass),
+        planted: Boolean(st.planted),
+        cooking: st.cooking || null,
+        storage: st.type === "chest" ? (Array.isArray(st.storage) ? st.storage.map(normalizeSlot) : emptySlots(CHEST_INV_CAP)) : null
       }))
     };
+  }
+
+  function applyOwnServerWorld(world) {
+    if (!world || !Array.isArray(world.raft) || !world.raftOffset) return;
+    const normalized = normalizeRemoteWorld(world, null);
+    const activeId = activeCannon?.serverObjectId || activeCannon?.id || null;
+    const openChestId = openChest?.serverObjectId || openChest?.id || null;
+    state.raftOffset.x = normalized.raftOffset.x;
+    state.raftOffset.y = normalized.raftOffset.y;
+    state.raft = normalized.raft.map((rt) => ({ ...rt, type: "deck" }));
+    state.structures = normalized.structures.map((st) => {
+      const local = { ...st, base: st.base || "raft" };
+      local.serverObjectId = st.id;
+      delete local.remoteOwnerId;
+      return local;
+    });
+    if (activeId) activeCannon = state.structures.find((st) => (st.serverObjectId || st.id) === activeId) || null;
+    if (openChestId) openChest = state.structures.find((st) => (st.serverObjectId || st.id) === openChestId) || null;
   }
 
   function applyServerSharks(sharks) {
@@ -1306,7 +1595,7 @@
     const serverHealth = clamp(cleanCoord(serverPlayer.health, state.player.health), 0, 100);
     if (serverHealth >= state.player.health) return;
     state.player.health = serverHealth;
-    toast("A server shark bit you.");
+    toast("You took server-side damage.");
     if (state.player.health <= 0) {
       state.player.health = 0;
       state.player.alive = false;
@@ -1410,6 +1699,7 @@
     if (activeCannon) {
       const turn = ((keys.has("KeyD") ? 1 : 0) - (keys.has("KeyA") ? 1 : 0)) * 1.8 * dt;
       activeCannon.aimOffset = clamp((activeCannon.aimOffset || 0) + turn, -Math.PI / 2, Math.PI / 2);
+      if (Math.abs(turn) > 0.001) syncRemoteStructure(activeCannon);
       mx = 0;
     }
     const len = Math.hypot(mx, my) || 1;
@@ -1434,10 +1724,16 @@
           p.x += dx;
           p.y += dy;
           rowingTimer += dt * 9;
+          rowingDurabilityTimer += dt;
+          if (rowingDurabilityTimer >= 0.75) {
+            rowingDurabilityTimer = 0;
+            useItemDurability();
+          }
         }
       }
     } else {
       rowingTimer = Math.max(0, rowingTimer - dt * 7);
+      rowingDurabilityTimer = 0;
     }
 
     updateCast(dt);
@@ -1513,6 +1809,22 @@
       }
     }
     return null;
+  }
+
+  function nearestRemoteStructure(p, maxDist = 56) {
+    let best = null;
+    let bestD = maxDist;
+    for (const [ownerId, world] of remoteWorlds) {
+      for (const st of world.structures || []) {
+        if (!st || st.hp <= 0) continue;
+        const d = dist(p, st);
+        if (d < bestD) {
+          best = { ownerId, structure: st };
+          bestD = d;
+        }
+      }
+    }
+    return best;
   }
 
   function moveRaft(dx, dy) {
@@ -1615,12 +1927,13 @@
   function collectDebris(d) {
     d.dead = true;
     if (d.type === "barrel") {
-      const haul = ["wood", "wood", "leaves", "scrap", "cloth", "rope", "glass"];
+      const haul = ["wood", "wood", "leaves", "scrap", "scrap", "cloth", "rope", "glass", "iron"];
       const found = {};
       for (let i = 0; i < 4; i++) {
         const item = haul[Math.floor(Math.random() * haul.length)];
         found[item] = (found[item] || 0) + 1;
       }
+      if (Math.random() < 0.08) found.steel = (found.steel || 0) + 1;
       for (const [item, qty] of Object.entries(found)) addRes(item, qty);
       gainXp(5);
       toast(`Barrel: ${Object.entries(found).map(([item, qty]) => `${qty} ${label(item).toLowerCase()}`).join(", ")}.`);
@@ -1812,7 +2125,7 @@
       }
       const victim = nearestRaftTile(s) || state.raft[0];
       const victimCenter = victim ? raftTileCenter(victim) : null;
-      if (aggro && victimCenter && dist(s, victimCenter) < 70 && s.bite <= 0 && state.raft.length > 2) {
+      if (aggro && victimCenter && dist(s, victimCenter) < 70 && s.bite <= 0) {
         damageRaftBlock(victim, SHARK_RAFT_DAMAGE);
         s.bite = 1.65;
         toast("Angry shark is chewing the raft.");
@@ -1920,7 +2233,6 @@
   }
 
   function breakRaftTile(rt) {
-    if (state.raft.length <= 2) return;
     const doomed = state.structures.filter((st) => st.base === "raft" && raftAt(st.x, st.y) === rt);
     state.structures = state.structures.filter((st) => !doomed.includes(st));
     if (doomed.includes(activeCannon)) activeCannon = null;
@@ -2005,7 +2317,8 @@
           const r = raftTileRect(rt);
           return shot.x > r.x && shot.x < r.x + r.w && shot.y > r.y && shot.y < r.y + r.h;
         });
-        if (hitAnimal || hitShark || hitStructure || hitRaft) shot.dead = true;
+        const hitRemoteWorld = armedForBlocks && cannonballHitsRemoteWorld(shot);
+        if (hitAnimal || hitShark || hitStructure || hitRaft || hitRemoteWorld) shot.dead = true;
       }
       if (shot.dead && !shot.exploded && shot.type === "cannonball") {
         shot.exploded = true;
@@ -2018,13 +2331,24 @@
     state.projectiles = state.projectiles.filter((shot) => !shot.dead);
   }
 
+  function cannonballHitsRemoteWorld(shot) {
+    for (const world of remoteWorlds.values()) {
+      if ((world.structures || []).some((st) => dist(st, shot) < footprintRadius(st.type) + 8)) return true;
+      if ((world.raft || []).some((rt) => {
+        const r = remoteRaftTileRect(world, rt);
+        return shot.x > r.x && shot.x < r.x + r.w && shot.y > r.y && shot.y < r.y + r.h;
+      })) return true;
+    }
+    return false;
+  }
+
   function fireCannon(cannon) {
     if (!cannon || cannon.hp <= 0) return;
     if (cannon.cooldown > 0) return toast("Cannon is reloading.");
     if (!spendStamina(12)) return;
     const angle = (cannon.angle || 0) + (cannon.aimOffset || 0);
     cannon.cooldown = 1.45;
-    state.projectiles.push({
+    const shot = {
       type: "cannonball",
       x: cannon.x + Math.cos(angle) * 36,
       y: cannon.y + Math.sin(angle) * 36,
@@ -2034,7 +2358,10 @@
       life: 1.28,
       damage: 42,
       radius: 52
-    });
+    };
+    state.projectiles.push(shot);
+    queueProjectileCommand(shot);
+    syncRemoteStructure(cannon);
     burst(cannon.x + Math.cos(angle) * 32, cannon.y + Math.sin(angle) * 32, "#ffe0a3", 9);
   }
 
@@ -2042,9 +2369,10 @@
     const p = state.player;
     if (musketCooldown > 0) return toast(`Musket reloading: ${Math.ceil(musketCooldown)}s.`);
     if (!spendStamina(14)) return;
+    useItemDurability();
     const angle = angleTo(p, mouseWorld());
     musketCooldown = 7;
-    state.projectiles.push({
+    const shot = {
       type: "musketBall",
       x: p.x + Math.cos(angle) * 38,
       y: p.y + Math.sin(angle) * 38,
@@ -2054,7 +2382,9 @@
       life: 1.05,
       damage: 21,
       radius: 8
-    });
+    };
+    state.projectiles.push(shot);
+    queueProjectileCommand(shot);
     burst(p.x + Math.cos(angle) * 34, p.y + Math.sin(angle) * 34, "#ffe7a8", 8);
   }
 
@@ -2089,9 +2419,12 @@
       }
       return true;
     }
+    if (damageRemoteStructureShot(shot)) return true;
     const hitRemote = remotePlayers.find((other) => other && other.health > 0 && dist(other, shot) < 22);
     if (hitRemote) {
       hitRemote.health = Math.max(0, (hitRemote.health || 100) - shot.damage);
+      queuePlayerHit(hitRemote.id, shot.damage);
+      toast(`Shot ${hitRemote.name || "player"}.`);
       return true;
     }
     return false;
@@ -2131,9 +2464,48 @@
       const c = { x: r.x + TILE / 2, y: r.y + TILE / 2 };
       if (dist(c, shot) > shot.radius + TILE * 0.35) continue;
       rt.hp -= Math.round(shot.damage * 0.75);
-      if (rt.hp <= 0 && state.raft.length > 2) breakRaftTile(rt);
+      if (rt.hp <= 0) breakRaftTile(rt);
+    }
+    damageRemoteWorldsInExplosion(shot);
+    for (const other of remotePlayers) {
+      if (!other || other.health <= 0 || dist(other, shot) > shot.radius) continue;
+      other.health = Math.max(0, (other.health || 100) - shot.damage);
+      queuePlayerHit(other.id, shot.damage);
     }
     gainXp(4);
+  }
+
+  function damageRemoteStructureShot(shot) {
+    for (const [ownerId, world] of remoteWorlds) {
+      for (const st of [...(world.structures || [])]) {
+        if (dist(st, shot) > footprintRadius(st.type) + 7) continue;
+        const damage = Math.max(4, Math.round(shot.damage * 0.3));
+        st.hp -= damage;
+        queueWorldCommand(ownerId, { type: "damageStructure", structureId: st.id, damage });
+        if (st.hp <= 0) removeRemoteStructureLocal(world, st);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function damageRemoteWorldsInExplosion(shot) {
+    for (const [ownerId, world] of remoteWorlds) {
+      for (const st of [...(world.structures || [])]) {
+        if (dist(st, shot) > shot.radius + footprintRadius(st.type)) continue;
+        st.hp -= shot.damage;
+        queueWorldCommand(ownerId, { type: "damageStructure", structureId: st.id, damage: shot.damage });
+        if (st.hp <= 0) removeRemoteStructureLocal(world, st);
+      }
+      for (const rt of [...(world.raft || [])]) {
+        const c = remoteTileCenter(world, rt);
+        if (dist(c, shot) > shot.radius + TILE * 0.35) continue;
+        const damage = Math.round(shot.damage * 0.75);
+        rt.hp -= damage;
+        queueWorldCommand(ownerId, { type: "damageRaftTile", gx: rt.gx, gy: rt.gy, damage });
+        if (rt.hp <= 0) removeRemoteRaftTileLocal(world, rt);
+      }
+    }
   }
 
   function updateWorldRespawns(dt) {
@@ -2226,6 +2598,27 @@
     state.player.stamina = clamp(state.player.stamina + amount, 0, 100);
   }
 
+  function selectedHotbarRef() {
+    return HOTBAR_SWAP_SLOTS.includes(selected) ? { area: "hotbar", index: selected } : null;
+  }
+
+  function useItemDurability(ref = selectedHotbarRef(), amount = 1) {
+    const item = getSlot(ref);
+    const spec = item && toolSpec(item.id);
+    if (!item || !spec?.durability) return true;
+    item.durability = clamp((item.durability ?? spec.durability) - amount, 0, item.maxDurability || spec.durability);
+    if (item.durability <= 0) {
+      setSlot(ref, null);
+      toast(`${label(item.id)} broke.`);
+    } else {
+      setSlot(ref, item);
+    }
+    syncManagedCountsFromSlots();
+    renderHotbar();
+    renderInventory();
+    return item.durability > 0;
+  }
+
   function useSelected() {
     if (!gameStarted) return;
     if (!state.player.alive) return;
@@ -2235,9 +2628,8 @@
     const id = hotbar[selected]?.id || "empty";
     if (buildMode) return placeBuild();
     if (id === "rod") return useRod();
-    if (id === "axe" || id === "metalAxe") return swing(id);
-    if (id === "spear" || id === "metalSpear") return swing(id);
-    if (id === "hammer" || id === "metalHammer") return swing(id);
+    const spec = toolSpec(id);
+    if (spec && ["axe", "spear", "hammer"].includes(spec.base)) return swing(id);
     if (id === "musket") return fireMusket();
     if (id === "bandage") return useBandage();
     if (FOOD_ITEMS.includes(id)) {
@@ -2256,6 +2648,7 @@
   function useRod() {
     if (cast) return;
     if (!spendStamina(4)) return;
+    useItemDurability();
     const p = state.player;
     const a = angleTo(p, mouseWorld());
     cast = { x: p.x, y: p.y, tx: p.x + Math.cos(a) * 330, ty: p.y + Math.sin(a) * 330, t: 0, hooked: false, catch: null };
@@ -2264,14 +2657,17 @@
   function swing(kind) {
     const p = state.player;
     if (p.attackCd > 0) return;
-    const metal = kind.startsWith("metal");
-    const baseKind = kind.includes("Spear") || kind === "spear" ? "spear" : kind.includes("Axe") || kind === "axe" ? "axe" : "hammer";
-    if (!spendStamina(baseKind === "spear" ? (metal ? 10 : 9) : metal ? 9 : 8)) return;
-    p.attackCd = baseKind === "spear" ? (metal ? 0.42 : 0.48) : metal ? 0.56 : 0.62;
+    const spec = toolSpec(kind);
+    if (!spec || !["axe", "spear", "hammer"].includes(spec.base)) return;
+    const baseKind = spec.base;
+    const tierStep = tierIndex(spec.tier);
+    if (!spendStamina(baseKind === "spear" ? 9 + tierStep * 0.5 : 8 + tierStep * 0.5)) return;
+    useItemDurability();
+    p.attackCd = baseKind === "spear" ? clamp(0.48 - tierStep * 0.04, 0.32, 0.48) : clamp(0.62 - tierStep * 0.05, 0.42, 0.62);
     toolAnim = { kind: baseKind, t: p.attackCd, duration: p.attackCd };
-    const reach = baseKind === "spear" ? (metal ? 96 : 82) : metal ? 68 : 58;
-    const baseDamage = baseKind === "spear" ? (metal ? 38 : 28) : baseKind === "axe" ? (metal ? 28 : 20) : metal ? 18 : 12;
-    const damage = baseDamage + p.strength * 3;
+    const reach = (baseKind === "spear" ? 82 : 58) + tierStep * (baseKind === "spear" ? 5 : 3);
+    const baseDamage = baseKind === "spear" ? 28 : baseKind === "axe" ? 20 : 12;
+    const damage = Math.round(baseDamage * spec.power + p.strength * 3);
     const targetAngle = angleTo(p, mouseWorld());
     burst(p.x + Math.cos(targetAngle) * 34, p.y + Math.sin(targetAngle) * 34, baseKind === "hammer" ? "#b8d4de" : "#fff3c9", 6);
 
@@ -2298,9 +2694,31 @@
       }
       return;
     }
-    if (baseKind === "axe" && damagePlacedItem(reach, targetAngle, Math.round(damage * (metal ? 0.65 : 0.52)))) return;
+    if (damageRemotePlayer(reach, targetAngle, damage)) return;
+    if (baseKind === "axe" && damagePlacedItem(reach, targetAngle, Math.round(damage * 0.42))) return;
     if (baseKind === "axe") chopTree(reach, targetAngle, damage);
-    if (baseKind === "hammer") repairTile(reach);
+    if (baseKind === "hammer") repairTile(reach, spec.power);
+  }
+
+  function damageRemotePlayer(reach, targetAngle, damage) {
+    const p = state.player;
+    let best = null;
+    let bestD = Infinity;
+    for (const other of remotePlayers) {
+      if (!other || other.health <= 0 || !other.id) continue;
+      const d = dist(p, other);
+      if (d < reach + 14 && Math.abs(shortAngle(targetAngle - angleTo(p, other))) < 0.9 && d < bestD) {
+        best = other;
+        bestD = d;
+      }
+    }
+    if (!best) return false;
+    best.health = Math.max(0, (best.health || 100) - damage);
+    queuePlayerHit(best.id, damage);
+    burst(best.x, best.y, "#ff8f75", 10);
+    gainXp(3);
+    toast(`Hit ${best.name || "player"}.`);
+    return true;
   }
 
   function damagePlacedItem(reach, targetAngle, damage) {
@@ -2333,7 +2751,7 @@
       if (d < reach + TILE * 0.45 && Math.abs(shortAngle(targetAngle - angleTo(p, c))) < 0.8) {
         rt.hp -= damage;
         burst(c.x, c.y, "#d89a54", 8);
-        if (rt.hp <= 0 && state.raft.length > 2) {
+        if (rt.hp <= 0) {
           breakRaftTile(rt);
           toast("Raft tile chopped apart.");
         } else {
@@ -2343,7 +2761,67 @@
         return true;
       }
     }
-    return false;
+    return damageRemotePlacedItem(reach, targetAngle, damage);
+  }
+
+  function remoteTileCenter(world, rt) {
+    const r = remoteRaftTileRect(world, rt);
+    return { x: r.x + TILE / 2, y: r.y + TILE / 2 };
+  }
+
+  function removeRemoteStructureLocal(world, st) {
+    world.structures = (world.structures || []).filter((item) => item !== st);
+    if (activeCannon === st) activeCannon = null;
+  }
+
+  function removeRemoteRaftTileLocal(world, rt) {
+    const r = remoteRaftTileRect(world, rt);
+    const doomed = (world.structures || []).filter((st) => st.base === "raft" && st.x > r.x && st.x < r.x + r.w && st.y > r.y && st.y < r.y + r.h);
+    world.structures = (world.structures || []).filter((st) => !doomed.includes(st));
+    world.raft = (world.raft || []).filter((tile) => tile !== rt);
+    if (doomed.includes(activeCannon)) activeCannon = null;
+  }
+
+  function damageRemotePlacedItem(reach, targetAngle, damage) {
+    const p = state.player;
+    let best = null;
+    let bestD = Infinity;
+    for (const [ownerId, world] of remoteWorlds) {
+      for (const st of world.structures || []) {
+        if (!st || st.hp <= 0) continue;
+        const d = dist(p, st);
+        if (d < reach + footprintRadius(st.type) && Math.abs(shortAngle(targetAngle - angleTo(p, st))) < 0.95 && d < bestD) {
+          best = { kind: "structure", ownerId, world, target: st };
+          bestD = d;
+        }
+      }
+      for (const rt of world.raft || []) {
+        const c = remoteTileCenter(world, rt);
+        const d = dist(p, c);
+        if (d < reach + TILE * 0.45 && Math.abs(shortAngle(targetAngle - angleTo(p, c))) < 0.8 && d < bestD) {
+          best = { kind: "tile", ownerId, world, target: rt, center: c };
+          bestD = d;
+        }
+      }
+    }
+    if (!best) return false;
+    if (best.kind === "structure") {
+      const st = best.target;
+      st.hp -= damage;
+      queueWorldCommand(best.ownerId, { type: "damageStructure", structureId: st.id, damage });
+      burst(st.x, st.y, "#ffb08a", 8);
+      if (st.hp <= 0) removeRemoteStructureLocal(best.world, st);
+      toast(`${label(st.type)} damaged.`);
+    } else {
+      const rt = best.target;
+      rt.hp -= damage;
+      queueWorldCommand(best.ownerId, { type: "damageRaftTile", gx: rt.gx, gy: rt.gy, damage });
+      burst(best.center.x, best.center.y, "#d89a54", 8);
+      if (rt.hp <= 0) removeRemoteRaftTileLocal(best.world, rt);
+      toast("Enemy raft tile damaged.");
+    }
+    gainXp(2);
+    return true;
   }
 
   function shortAngle(a) {
@@ -2411,7 +2889,7 @@
     }
   }
 
-  function repairTile(reach) {
+  function repairTile(reach, power = 1) {
     const p = state.player;
     let closestStructure = null;
     let closestStructureD = Infinity;
@@ -2425,7 +2903,7 @@
     if (closestStructure) {
       if (state.resources.wood < 2) return toast("Need 2 wood to repair.");
       state.resources.wood -= 2;
-      closestStructure.hp = clamp(closestStructure.hp + 35, 0, closestStructure.maxHp);
+      closestStructure.hp = clamp(closestStructure.hp + Math.round(35 * power), 0, closestStructure.maxHp);
       return toast(`${label(closestStructure.type)} repaired.`);
     }
 
@@ -2443,7 +2921,7 @@
     if (!best) return;
     if (state.resources.wood < 2) return toast("Need 2 wood to repair.");
     state.resources.wood -= 2;
-    best.hp = clamp(best.hp + 30, 0, best.maxHp);
+    best.hp = clamp(best.hp + Math.round(30 * power), 0, best.maxHp);
     toast("Raft tile repaired.");
   }
 
@@ -2488,6 +2966,11 @@
         return;
       }
     }
+    const remoteStructure = nearestRemoteStructure(p, 56);
+    if (remoteStructure) {
+      operateStructure(remoteStructure.structure);
+      return;
+    }
     toast("Nothing close enough to interact with.");
   }
 
@@ -2502,6 +2985,7 @@
         addRes(st.cooking === "rawFish" ? "cookedFish" : "cookedMeat", 1);
         st.cooking = null;
         gainXp(5);
+        syncRemoteStructure(st);
         return toast("Collected cooked food.");
       }
       const cookable = state.resources.rawFish > 0 ? "rawFish" : state.resources.sharkMeat > 0 ? "sharkMeat" : state.resources.meat > 0 ? "meat" : null;
@@ -2513,6 +2997,7 @@
         st.maxTimer = GRILL_TIME;
         st.ready = false;
         renderHotbar();
+        syncRemoteStructure(st);
         return toast(`${label(cookable)} is cooking.`);
       }
       return toast("Need raw fish or raw meat for the grill.");
@@ -2535,6 +3020,7 @@
         st.hasGlass = false;
         gainXp(4);
         renderHotbar();
+        syncRemoteStructure(st);
         return toast("Filled water flask returned.");
       }
       if (hotbar[selected]?.id !== "flask") return toast("Select the water flask to use the water maker.");
@@ -2545,6 +3031,7 @@
         st.maxTimer = WATER_TIME;
         st.ready = false;
         renderHotbar();
+        syncRemoteStructure(st);
         return toast("Water maker is filling your flask.");
       }
       return toast("Need an empty water flask.");
@@ -2555,6 +3042,7 @@
         st.planted = false;
         addRes("tomato", 2);
         gainXp(5);
+        syncRemoteStructure(st);
         return toast("Tomatoes harvested.");
       }
       if (st.timer <= 0 && managedItemCount("tomato") > 0) {
@@ -2563,6 +3051,7 @@
         st.ready = false;
         st.timer = TOMATO_GROW_TIME;
         st.maxTimer = TOMATO_GROW_TIME;
+        syncRemoteStructure(st);
         return toast("Tomato planted.");
       }
       if (st.timer > 0) return toast("Tomatoes are still growing.");
@@ -2574,11 +3063,34 @@
     }
   }
 
+  function structureServerPatch(st) {
+    return {
+      timer: st.timer || 0,
+      maxTimer: st.maxTimer || 0,
+      ready: Boolean(st.ready),
+      hasGlass: Boolean(st.hasGlass),
+      planted: Boolean(st.planted),
+      cooking: st.cooking || null,
+      aimOffset: st.aimOffset || 0,
+      cooldown: st.cooldown || 0,
+      storage: st.type === "chest" ? chestSlots(st) : null
+    };
+  }
+
+  function syncRemoteStructure(st) {
+    if (!st?.remoteOwnerId || !st.id) return;
+    queueWorldCommand(st.remoteOwnerId, { type: "patchStructure", structureId: st.id, patch: structureServerPatch(st) });
+  }
+
   function craft(name, holdAfterCraft = false) {
     if (!gameStarted) return false;
     if (!spendStamina(3)) return false;
     const recipe = recipes[name];
     if (!recipe) return false;
+    if (!recipeVisible(name)) {
+      toast("Craft the previous tier first.");
+      return false;
+    }
     if ((name === "bandage" || isBuildRecipe(name)) && !playerHasInventorySpaceFor(name)) {
       toast("Backpack is full.");
       return false;
@@ -2601,6 +3113,7 @@
       toast("Bandage crafted.");
     } else if (isHotbarCraftRecipe(name)) {
       if (!addPlayerItem(name, 1, "hotbar")) return toast("Backpack and hotbar are full.");
+      markToolUnlocked(name);
       putItemInHotbar(name, true);
       buildMode = false;
       heldItem = name;
@@ -2635,6 +3148,16 @@
     const craftedNow = ensureBuildReady(buildChoice);
     if (!craftedNow) return;
     if (buildChoice === "raft") {
+      if (state.raft.length === 0) {
+        if (isOnIsland(spot)) return toast("Start a new raft in open water.");
+        state.raftOffset.x = spot.x - TILE / 2;
+        state.raftOffset.y = spot.y - TILE / 2;
+        state.raft.push(tile(0, 0, "deck"));
+        consumeBuild(buildChoice);
+        toast("New raft started.");
+        gainXp(6);
+        return;
+      }
       const gx = Math.round((spot.x - state.raftOffset.x - TILE / 2) / TILE);
       const gy = Math.round((spot.y - state.raftOffset.y - TILE / 2) / TILE);
       if (state.raft.some((rt) => rt.gx === gx && rt.gy === gy)) return toast("That raft tile already exists.");
@@ -3050,7 +3573,7 @@
     const currentBase = xpForLevel(p.level);
     const nextBase = xpForLevel(p.level + 1);
     setMeter("xp", ((p.totalXp - currentBase) / (nextBase - currentBase)) * 100);
-    for (const key of ["wood", "leaves", "scrap", "cloth", "rope", "glass", "rawFish", "cookedFish", "sharkMeat", "meat", "cookedMeat", "coconut", "tomato"]) {
+    for (const key of ["wood", "leaves", "scrap", "iron", "steel", "cloth", "rope", "glass", "rawFish", "cookedFish", "sharkMeat", "meat", "cookedMeat", "coconut", "tomato"]) {
       document.querySelector(`[data-res="${key}"]`).textContent = `${cap(key)} ${state.resources[key] || 0}`;
     }
     document.getElementById("level").textContent = p.level;
@@ -3074,6 +3597,8 @@
     const p = state.player;
     const st = state.structures.find((s) => dist(s, p) < 56);
     if (st) return `F: use ${label(st.type)}`;
+    const remoteSt = nearestRemoteStructure(p, 56);
+    if (remoteSt) return `F: use ${label(remoteSt.structure.type)}`;
     const nearLoot = state.debris.some((d) => dist(d, p) < 84) || state.islands.some((is) => is.loot.some((l) => !l.dead && dist(l, p) < 46));
     if (nearLoot) return "F: pick up";
     if (!isOnRaft(p) && !isOnIsland(p)) {
@@ -3235,8 +3760,13 @@
 
     for (const loot of wreck.loot) {
       if (loot.dead) continue;
-      if (loot.type === "scrap") {
-        drawScrapModel(loot.x, loot.y, 0.95);
+      if (loot.type === "scrap" || loot.type === "iron" || loot.type === "steel") {
+        const colors = {
+          scrap: ["#879aa1", "#c9d8dc"],
+          iron: ["#b4bdc2", "#eef4f5"],
+          steel: ["#6f858e", "#e8fbff"]
+        }[loot.type];
+        drawScrapModel(loot.x, loot.y, 0.95, colors[0], colors[1]);
       } else if (loot.type === "glass") {
         drawGlassModel(loot.x, loot.y, 0.95);
       } else if (loot.type === "rope") {
@@ -3253,11 +3783,11 @@
     }
   }
 
-  function drawScrapModel(x = 0, y = 0, scale = 1) {
+  function drawScrapModel(x = 0, y = 0, scale = 1, primary = "#879aa1", highlight = "#c9d8dc") {
     ctx.save();
     ctx.translate(x, y);
     ctx.scale(scale, scale);
-    ctx.fillStyle = "#879aa1";
+    ctx.fillStyle = primary;
     ctx.beginPath();
     ctx.moveTo(-13, -8);
     ctx.lineTo(5, -12);
@@ -3266,7 +3796,7 @@
     ctx.lineTo(-9, 8);
     ctx.closePath();
     ctx.fill();
-    ctx.fillStyle = "#c9d8dc";
+    ctx.fillStyle = highlight;
     ctx.beginPath();
     ctx.moveTo(-5, -6);
     ctx.lineTo(8, -8);
@@ -3492,16 +4022,12 @@
   }
 
   function drawRemoteStructure(st) {
-    const f = footprint(st.type);
     ctx.save();
     ctx.translate(st.x, st.y);
     ctx.rotate(st.angle || 0);
-    ctx.fillStyle = st.type === "wall" ? "#77613f" : st.type === "torch" ? "#bb8b43" : st.type === "cannon" ? "#535c63" : st.type === "waterMaker" ? "#578b94" : "#735238";
-    roundRect(-f.w / 2, -f.h / 2, f.w, f.h, st.type === "wall" ? f.h / 2 : 5);
-    ctx.fill();
-    ctx.strokeStyle = "rgba(255,255,255,0.2)";
-    ctx.stroke();
+    drawStructureBody(st);
     ctx.restore();
+    if (st.hp < st.maxHp) healthBar(st.x, st.y - 30, st.hp / st.maxHp, 36);
   }
 
   function drawStructures() {
@@ -3509,115 +4035,117 @@
       ctx.save();
       ctx.translate(st.x, st.y);
       ctx.rotate(st.angle || 0);
-      if (st.type === "grill") {
-        ctx.fillStyle = "#29333a";
-        roundRect(-15, -12, 30, 24, 5);
-        ctx.fill();
-        ctx.strokeStyle = "#cbd5d9";
-        ctx.lineWidth = 2;
-        for (let x = -9; x <= 9; x += 6) {
-          ctx.beginPath();
-          ctx.moveTo(x, -10);
-          ctx.lineTo(x, 10);
-          ctx.stroke();
-        }
-        if (st.timer > 0 || st.ready) {
-          ctx.fillStyle = st.ready ? "#ffd36a" : "#ff7c45";
-          circle(0, 0, st.ready ? 8 : 5 + Math.sin(waveTime * 8) * 2);
-        }
-        drawMachineProgress(st, 18);
-      } else if (st.type === "waterMaker") {
-        ctx.fillStyle = "#6fb9cb";
-        roundRect(-15, -15, 30, 30, 5);
-        ctx.fill();
-        ctx.fillStyle = st.ready ? "#d8fbff" : "#245e6d";
-        circle(0, 0, 8);
-        if (st.hasGlass || st.ready) {
-          drawFlaskModel(15, -9, 0.38, st.ready);
-        }
-        drawMachineProgress(st, 21);
-      } else if (st.type === "plantPot") {
-        ctx.fillStyle = "#8f5634";
-        roundRect(-15, -10, 30, 22, 5);
-        ctx.fill();
-        if (st.planted || st.ready || st.timer > 0) {
-          const progress = st.ready ? 1 : st.maxTimer ? 1 - st.timer / st.maxTimer : 0;
-          const red = Math.round(75 + progress * 142);
-          const green = Math.round(177 - progress * 102);
-          ctx.fillStyle = `rgb(${red}, ${green}, 70)`;
-          circle(-5, -8, 6);
-          circle(6, -9, 6);
-          ctx.fillStyle = "#4fb162";
-          ctx.beginPath();
-          ctx.moveTo(0, -8);
-          ctx.lineTo(-8, -18);
-          ctx.lineTo(8, -18);
-          ctx.closePath();
-          ctx.fill();
-        }
-        drawMachineProgress(st, 18);
-      } else if (st.type === "chest") {
-        ctx.fillStyle = "#8e552e";
-        roundRect(-16, -12, 32, 24, 5);
-        ctx.fill();
-        ctx.fillStyle = "#e2ba5a";
-        ctx.fillRect(-3, -12, 6, 24);
-      } else if (st.type === "wall") {
-        ctx.fillStyle = "#9c642f";
-        roundRect(-32, -14, 64, 28, 14);
-        ctx.fill();
-        ctx.fillStyle = "rgba(74, 42, 21, 0.28)";
-        roundRect(-25, -8, 50, 5, 3);
-        ctx.fill();
-        roundRect(-25, 3, 50, 5, 3);
-        ctx.fill();
-      } else if (st.type === "torch") {
-        ctx.fillStyle = "#6b4429";
-        roundRect(-4, -2, 8, 22, 3);
-        ctx.fill();
-        ctx.fillStyle = "#ffb238";
-        circle(0, -9, 9 + Math.sin(waveTime * 12) * 1.5);
-        ctx.fillStyle = "#fff1a8";
-        circle(0, -10, 4);
-      } else if (st.type === "cannon") {
-        const aim = st.aimOffset || 0;
-        if (activeCannon === st) {
-          ctx.save();
-          ctx.globalAlpha = 0.22;
-          ctx.fillStyle = "#d7eef2";
-          ctx.beginPath();
-          ctx.moveTo(0, 0);
-          ctx.arc(0, 0, 72, -Math.PI / 2, Math.PI / 2);
-          ctx.closePath();
-          ctx.fill();
-          ctx.restore();
-        }
-        ctx.fillStyle = "#5d6470";
-        roundRect(-21, -15, 42, 30, 7);
-        ctx.fill();
-        ctx.fillStyle = "#373b43";
-        ctx.save();
-        ctx.rotate(aim);
-        roundRect(-4, -8, 46, 16, 8);
-        ctx.fill();
-        ctx.fillStyle = "#1f2228";
-        circle(42, 0, 8);
-        ctx.restore();
-        ctx.fillStyle = "#2b2e35";
-        circle(-8, 0, 10);
-        ctx.fillStyle = activeCannon === st ? "#ffd36a" : "#99a6ad";
-        circle(-8, 0, 4);
-        if (st.cooldown > 0) {
-          ctx.fillStyle = "rgba(0, 0, 0, 0.42)";
-          roundRect(-18, 19, 36, 5, 3);
-          ctx.fill();
-          ctx.fillStyle = "#ffb45d";
-          roundRect(-18, 19, 36 * (1 - st.cooldown / 1.45), 5, 3);
-          ctx.fill();
-        }
-      }
+      drawStructureBody(st);
       ctx.restore();
       if (st.hp < st.maxHp) healthBar(st.x, st.y - 30, st.hp / st.maxHp, 36);
+    }
+  }
+
+  function drawStructureBody(st) {
+    if (st.type === "grill") {
+      ctx.fillStyle = "#29333a";
+      roundRect(-15, -12, 30, 24, 5);
+      ctx.fill();
+      ctx.strokeStyle = "#cbd5d9";
+      ctx.lineWidth = 2;
+      for (let x = -9; x <= 9; x += 6) {
+        ctx.beginPath();
+        ctx.moveTo(x, -10);
+        ctx.lineTo(x, 10);
+        ctx.stroke();
+      }
+      if (st.timer > 0 || st.ready) {
+        ctx.fillStyle = st.ready ? "#ffd36a" : "#ff7c45";
+        circle(0, 0, st.ready ? 8 : 5 + Math.sin(waveTime * 8) * 2);
+      }
+      drawMachineProgress(st, 18);
+    } else if (st.type === "waterMaker") {
+      ctx.fillStyle = "#6fb9cb";
+      roundRect(-15, -15, 30, 30, 5);
+      ctx.fill();
+      ctx.fillStyle = st.ready ? "#d8fbff" : "#245e6d";
+      circle(0, 0, 8);
+      if (st.hasGlass || st.ready) drawFlaskModel(15, -9, 0.38, st.ready);
+      drawMachineProgress(st, 21);
+    } else if (st.type === "plantPot") {
+      ctx.fillStyle = "#8f5634";
+      roundRect(-15, -10, 30, 22, 5);
+      ctx.fill();
+      if (st.planted || st.ready || st.timer > 0) {
+        const progress = st.ready ? 1 : st.maxTimer ? 1 - st.timer / st.maxTimer : 0;
+        const red = Math.round(75 + progress * 142);
+        const green = Math.round(177 - progress * 102);
+        ctx.fillStyle = `rgb(${red}, ${green}, 70)`;
+        circle(-5, -8, 6);
+        circle(6, -9, 6);
+        ctx.fillStyle = "#4fb162";
+        ctx.beginPath();
+        ctx.moveTo(0, -8);
+        ctx.lineTo(-8, -18);
+        ctx.lineTo(8, -18);
+        ctx.closePath();
+        ctx.fill();
+      }
+      drawMachineProgress(st, 18);
+    } else if (st.type === "chest") {
+      ctx.fillStyle = "#8e552e";
+      roundRect(-16, -12, 32, 24, 5);
+      ctx.fill();
+      ctx.fillStyle = "#e2ba5a";
+      ctx.fillRect(-3, -12, 6, 24);
+    } else if (st.type === "wall") {
+      ctx.fillStyle = "#9c642f";
+      roundRect(-32, -14, 64, 28, 14);
+      ctx.fill();
+      ctx.fillStyle = "rgba(74, 42, 21, 0.28)";
+      roundRect(-25, -8, 50, 5, 3);
+      ctx.fill();
+      roundRect(-25, 3, 50, 5, 3);
+      ctx.fill();
+    } else if (st.type === "torch") {
+      ctx.fillStyle = "#6b4429";
+      roundRect(-4, -2, 8, 22, 3);
+      ctx.fill();
+      ctx.fillStyle = "#ffb238";
+      circle(0, -9, 9 + Math.sin(waveTime * 12) * 1.5);
+      ctx.fillStyle = "#fff1a8";
+      circle(0, -10, 4);
+    } else if (st.type === "cannon") {
+      const aim = st.aimOffset || 0;
+      if (activeCannon === st) {
+        ctx.save();
+        ctx.globalAlpha = 0.22;
+        ctx.fillStyle = "#d7eef2";
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.arc(0, 0, 72, -Math.PI / 2, Math.PI / 2);
+        ctx.closePath();
+        ctx.fill();
+        ctx.restore();
+      }
+      ctx.fillStyle = "#5d6470";
+      roundRect(-21, -15, 42, 30, 7);
+      ctx.fill();
+      ctx.fillStyle = "#373b43";
+      ctx.save();
+      ctx.rotate(aim);
+      roundRect(-4, -8, 46, 16, 8);
+      ctx.fill();
+      ctx.fillStyle = "#1f2228";
+      circle(42, 0, 8);
+      ctx.restore();
+      ctx.fillStyle = "#2b2e35";
+      circle(-8, 0, 10);
+      ctx.fillStyle = activeCannon === st ? "#ffd36a" : "#99a6ad";
+      circle(-8, 0, 4);
+      if (st.cooldown > 0) {
+        ctx.fillStyle = "rgba(0, 0, 0, 0.42)";
+        roundRect(-18, 19, 36, 5, 3);
+        ctx.fill();
+        ctx.fillStyle = "#ffb45d";
+        roundRect(-18, 19, 36 * (1 - st.cooldown / 1.45), 5, 3);
+        ctx.fill();
+      }
     }
   }
 
@@ -3802,7 +4330,7 @@
   }
 
   function drawProjectiles() {
-    for (const shot of state.projectiles) {
+    for (const shot of [...serverProjectiles, ...state.projectiles]) {
       const a = Math.atan2(shot.vy, shot.vx);
       ctx.save();
       ctx.translate(shot.x, shot.y);
@@ -3855,6 +4383,7 @@
       ctx.moveTo(4, 10);
       ctx.lineTo(24, 15);
       ctx.stroke();
+      drawRemoteHeldItem(other.selectedItem);
       ctx.restore();
       ctx.fillStyle = "rgba(5, 16, 22, 0.65)";
       roundRect(other.x - 31, other.y - 38, 62, 16, 6);
@@ -3867,11 +4396,34 @@
     }
   }
 
+  function drawRemoteHeldItem(item) {
+    const spec = toolSpec(item);
+    if (hotbarResource(item) || FOOD_ITEMS.includes(item)) return drawHeldResourceItem(item);
+    if (spec?.base === "spear") return drawHeldSpear(spec);
+    if (spec?.base === "axe") return drawHeldAxe(spec);
+    if (spec?.base === "hammer") return drawHeldHammer(spec);
+    if (item === "musket") return drawHeldMusket();
+    if (item === "oar") {
+      ctx.save();
+      ctx.translate(16, 0);
+      ctx.strokeStyle = "#8c5a34";
+      ctx.lineWidth = 5;
+      ctx.beginPath();
+      ctx.moveTo(-22, 0);
+      ctx.lineTo(58, 0);
+      ctx.stroke();
+      ctx.fillStyle = "#b8783f";
+      ellipse(73, 0, 18, 8, 0);
+      ctx.restore();
+    }
+  }
+
   function drawPlayer() {
     const p = state.player;
     const moving = keys.has("KeyW") || keys.has("KeyA") || keys.has("KeyS") || keys.has("KeyD");
     const handSwing = moving ? Math.sin(waveTime * 10) * 5 : Math.sin(waveTime * 3) * 1.5;
     const item = hotbar[selected].id;
+    const heldSpec = toolSpec(item);
     ctx.save();
     ctx.translate(p.x, p.y);
     ctx.rotate(p.facing);
@@ -3897,12 +4449,12 @@
       drawHeldBuildItem();
     } else if (hotbarResource(item) || availableFoods().includes(item)) {
       drawHeldResourceItem(item);
-    } else if (item === "spear" || item === "metalSpear") {
-      drawHeldSpear(item === "metalSpear");
-    } else if (item === "axe" || item === "metalAxe") {
-      drawHeldAxe(item === "metalAxe");
-    } else if (item === "hammer" || item === "metalHammer") {
-      drawHeldHammer(item === "metalHammer");
+    } else if (heldSpec?.base === "spear") {
+      drawHeldSpear(heldSpec);
+    } else if (heldSpec?.base === "axe") {
+      drawHeldAxe(heldSpec);
+    } else if (heldSpec?.base === "hammer") {
+      drawHeldHammer(heldSpec);
     } else if (item === "musket") {
       drawHeldMusket();
     } else if (item === "oar") {
@@ -3935,66 +4487,77 @@
     return p <= 0 ? 0 : Math.sin(p * Math.PI);
   }
 
-  function drawHeldSpear(metal = false) {
+  function toolDrawStyle(specOrMetal = false) {
+    if (typeof specOrMetal === "boolean") {
+      return { metal: specOrMetal, tierStep: specOrMetal ? 1 : 0, color: specOrMetal ? "#99a9af" : "#d4bd82" };
+    }
+    const spec = specOrMetal || TOOL_TIERS.wood;
+    return { metal: spec.tier !== "wood", tierStep: tierIndex(spec.tier || "wood"), color: spec.color || TOOL_TIERS.wood.color };
+  }
+
+  function drawHeldSpear(specOrMetal = false) {
+    const style = toolDrawStyle(specOrMetal);
     const jab = swingCurve("spear") * 26;
     ctx.save();
     ctx.translate(jab, 0);
-    ctx.strokeStyle = metal ? "#99a9af" : "#d4bd82";
-    ctx.lineWidth = metal ? 5 : 4;
+    ctx.strokeStyle = style.color;
+    ctx.lineWidth = style.metal ? 5 : 4;
     ctx.beginPath();
     ctx.moveTo(8, -8);
-    ctx.lineTo(metal ? 66 : 58, -8);
+    ctx.lineTo(style.metal ? 66 : 58, -8);
     ctx.stroke();
-    ctx.fillStyle = metal ? "#e7eef0" : "#b7ccd0";
+    ctx.fillStyle = style.metal ? "#e7eef0" : "#b7ccd0";
     ctx.beginPath();
-    ctx.moveTo(metal ? 78 : 68, -8);
-    ctx.lineTo(metal ? 62 : 55, metal ? -17 : -15);
-    ctx.lineTo(metal ? 62 : 55, metal ? 1 : -1);
+    ctx.moveTo(style.metal ? 78 : 68, -8);
+    ctx.lineTo(style.metal ? 62 : 55, style.metal ? -17 : -15);
+    ctx.lineTo(style.metal ? 62 : 55, style.metal ? 1 : -1);
     ctx.closePath();
     ctx.fill();
     ctx.restore();
   }
 
-  function drawHeldAxe(metal = false) {
+  function drawHeldAxe(specOrMetal = false) {
+    const style = toolDrawStyle(specOrMetal);
     const swing = swingCurve("axe");
     ctx.save();
     ctx.translate(15, -4);
     ctx.rotate(-0.55 + swing * 1.55);
-    ctx.strokeStyle = metal ? "#5e6b70" : "#8b5b35";
+    ctx.strokeStyle = style.metal ? "#5e6b70" : "#8b5b35";
     ctx.lineWidth = 5;
     ctx.beginPath();
     ctx.moveTo(-4, 8);
     ctx.lineTo(39, -8);
     ctx.stroke();
-    ctx.fillStyle = metal ? "#8fa0a7" : "#c3d1d6";
-    roundRect(32, -20, metal ? 20 : 16, 21, 4);
+    ctx.fillStyle = style.metal ? style.color : "#c3d1d6";
+    roundRect(32, -20, style.metal ? 20 : 16, 21, 4);
     ctx.fill();
-    ctx.fillStyle = metal ? "#eef7f9" : "#eef6f8";
+    ctx.fillStyle = style.metal ? "#eef7f9" : "#eef6f8";
     ctx.beginPath();
-    ctx.moveTo(metal ? 50 : 47, metal ? -22 : -19);
-    ctx.lineTo(metal ? 64 : 58, -11);
-    ctx.lineTo(metal ? 50 : 48, metal ? 0 : -2);
+    ctx.moveTo(style.metal ? 50 : 47, style.metal ? -22 : -19);
+    ctx.lineTo(style.metal ? 64 : 58, -11);
+    ctx.lineTo(style.metal ? 50 : 48, style.metal ? 0 : -2);
     ctx.closePath();
     ctx.fill();
     ctx.restore();
   }
 
-  function drawHeldHammer(metal = false) {
+  function drawHeldHammer(specOrMetal = false) {
+    const style = toolDrawStyle(specOrMetal);
     const swing = swingCurve("hammer");
     ctx.save();
     ctx.translate(15, 4);
     ctx.rotate(0.5 - swing * 1.45);
-    ctx.strokeStyle = metal ? "#617178" : "#7a5133";
+    ctx.strokeStyle = style.metal ? "#617178" : "#7a5133";
     ctx.lineWidth = 5;
     ctx.beginPath();
     ctx.moveTo(-3, -6);
     ctx.lineTo(38, 9);
     ctx.stroke();
-    ctx.fillStyle = metal ? "#798b93" : "#9aaab0";
-    roundRect(32, -1, metal ? 30 : 24, metal ? 16 : 14, 4);
+    ctx.fillStyle = style.metal ? style.color : "#9aaab0";
+    roundRect(32, -1, style.metal ? 30 : 24, style.metal ? 16 : 14, 4);
     ctx.fill();
     ctx.fillStyle = "#cad5d8";
-    ctx.fillRect(38, 1, 5, metal ? 13 : 12);
+    ctx.fillRect(38, 1, 5, style.metal ? 13 : 12);
     ctx.restore();
   }
 
@@ -4031,11 +4594,12 @@
 
   function drawHeldBuildItem() {
     if (!isBuildRecipe(buildChoice)) {
+      const spec = toolSpec(buildChoice);
       if (buildChoice === "bandage") return drawHeldResourceItem("bandage");
       if (buildChoice === "flask") return drawHeldResourceItem("flask");
-      if (buildChoice === "spear" || buildChoice === "metalSpear") return drawHeldSpear(buildChoice === "metalSpear");
-      if (buildChoice === "axe" || buildChoice === "metalAxe") return drawHeldAxe(buildChoice === "metalAxe");
-      if (buildChoice === "hammer" || buildChoice === "metalHammer") return drawHeldHammer(buildChoice === "metalHammer");
+      if (spec?.base === "spear") return drawHeldSpear(spec);
+      if (spec?.base === "axe") return drawHeldAxe(spec);
+      if (spec?.base === "hammer") return drawHeldHammer(spec);
       if (buildChoice === "musket") return drawHeldMusket();
     }
     ctx.save();
@@ -4080,6 +4644,8 @@
       wood: "#b87942",
       leaves: "#64b957",
       scrap: "#a9c3c8",
+      iron: "#d6dde0",
+      steel: "#e7f3f5",
       cloth: "#e4e1cf",
       rope: "#d0ad62",
       glass: "#9ae9ff",
@@ -4100,8 +4666,13 @@
       ctx.beginPath();
       ctx.arc(0, 0, 11, 0, TAU);
       ctx.stroke();
-    } else if (name === "scrap") {
-      drawScrapModel(0, 0, 0.82);
+    } else if (name === "scrap" || name === "iron" || name === "steel") {
+      const colors = {
+        scrap: ["#879aa1", "#c9d8dc"],
+        iron: ["#b4bdc2", "#eef4f5"],
+        steel: ["#6f858e", "#e8fbff"]
+      }[name];
+      drawScrapModel(0, 0, 0.82, colors[0], colors[1]);
     } else if (name === "glass") {
       drawGlassModel(0, 0, 0.82);
     } else if (name === "flask" || name === "waterFlask") {
@@ -4242,6 +4813,8 @@
   }
 
   function label(s) {
+    const spec = toolSpec(s);
+    if (spec) return spec.label;
     return {
       raft: "Raft Tile",
       grill: "Grill",
@@ -4253,9 +4826,6 @@
       cannon: "Cannon",
       flask: "Empty Water Flask",
       waterFlask: "Filled Water Flask",
-      metalAxe: "Metal Axe",
-      metalSpear: "Metal Spear",
-      metalHammer: "Metal Hammer",
       musket: "Musket",
       sharkMeat: "Raw Shark Meat",
       rawFish: "Raw Fish",
