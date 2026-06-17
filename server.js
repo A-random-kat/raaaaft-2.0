@@ -47,6 +47,7 @@ const SERVER_SHARK_SPEED = 115;
 const SERVER_SHARK_DAMAGE = 36;
 const SERVER_SHARK_BITE_MS = 1300;
 const TOMBSTONE_MS = 5000;
+const MAX_BODY_BYTES = 5_000_000;
 const players = new Map();
 let lastSharkTick = Date.now();
 let lastWorldTick = Date.now();
@@ -75,7 +76,7 @@ function readBody(req) {
     let body = "";
     req.on("data", (chunk) => {
       body += chunk;
-      if (body.length > 1_000_000) req.destroy();
+      if (body.length > MAX_BODY_BYTES) req.destroy();
     });
     req.on("end", () => {
       try {
@@ -101,6 +102,11 @@ function setCors(res) {
 function cleanNumber(value, fallback) {
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
+}
+
+function cleanPlayerId(value) {
+  const id = String(value || "").trim().slice(0, 80);
+  return /^[a-zA-Z0-9_.:-]{6,80}$/.test(id) ? id : crypto.randomUUID();
 }
 
 function clamp(value, min, max) {
@@ -614,12 +620,22 @@ const server = http.createServer(async (req, res) => {
     return res.end();
   }
 
+  if (req.method === "GET" && req.url === "/api/health") {
+    return sendJson(res, { ok: true, players: activePlayers().length });
+  }
+
   if (req.method === "POST" && req.url === "/api/join") {
     const body = await readBody(req);
-    const id = crypto.randomUUID();
-    const player = playerFromBody(id, body);
-    const preferred = player.world ? raftCenter(player.world) : { x: player.x, y: player.y };
-    shiftWorldToSpawn(player.world, player, chooseSpawnPoint(preferred));
+    const id = cleanPlayerId(body.id || body.clientId);
+    const shouldResume = Boolean(body.resume);
+    const existing = shouldResume ? players.get(id) : null;
+    const player = playerFromBody(id, body, existing || {});
+    if (!shouldResume) {
+      const preferred = player.world ? raftCenter(player.world) : { x: player.x, y: player.y };
+      shiftWorldToSpawn(player.world, player, chooseSpawnPoint(preferred));
+    } else if (!player.spawnedAt) {
+      player.spawnedAt = Date.now();
+    }
     players.set(id, player);
     tickServerWorlds();
     tickServerSharks();
@@ -628,7 +644,7 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === "POST" && req.url === "/api/state") {
     const body = await readBody(req);
-    const id = String(body.id || crypto.randomUUID());
+    const id = cleanPlayerId(body.id || body.clientId);
     const existing = players.get(id);
     const player = playerFromBody(id, body, existing);
     if (!existing && !player.spawnedAt) player.spawnedAt = Date.now();

@@ -34,8 +34,8 @@
   const TREE_COLLISION_RADIUS = 18;
   const INITIAL_DEBRIS = 150;
   const DEBRIS_TARGET = 140;
-  const SERVER_SYNC_INTERVAL = 0.45;
-  const SERVER_REQUEST_TIMEOUT = 2500;
+  const SERVER_SYNC_INTERVAL = 0.7;
+  const SERVER_REQUEST_TIMEOUT = 8000;
   const SPAWN_CLEARANCE = 520;
   const SPAWN_POINTS = [
     { x: 520, y: 520 },
@@ -58,7 +58,7 @@
   const SHIPWRECK_SCALE = 2;
   const SHIPWRECK_INTERACT_RADIUS = 270;
   const SHIPWRECK_CLEAR_RADIUS = 152;
-  const SERVER_API_ROOT = location.protocol === "file:" ? "http://127.0.0.1:4173" : "";
+  const SERVER_API_ROOT = resolveServerApiRoot();
   const GRILL_TIME = 60;
   const WATER_TIME = 60;
   const TOMATO_GROW_TIME = 300;
@@ -201,9 +201,41 @@
   let pendingProjectileCommands = [];
   let localChannel = null;
   let usingLocalMultiplayer = false;
-  let localPeerId = `local-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  let localPeerId = getClientSessionId();
   const localPeers = new Map();
   let lastHudRender = 0;
+
+  function resolveServerApiRoot() {
+    let explicit = "";
+    try {
+      const params = new URLSearchParams(location.search || "");
+      explicit = params.get("server") || localStorage.getItem("raaft-io-server-url") || "";
+      if (params.get("server")) localStorage.setItem("raaft-io-server-url", params.get("server"));
+    } catch {
+      explicit = "";
+    }
+    if (explicit) return normalizeServerRoot(explicit);
+    return location.protocol === "file:" ? "http://127.0.0.1:4173" : "";
+  }
+
+  function normalizeServerRoot(value) {
+    const trimmed = String(value || "").trim();
+    if (!trimmed) return "";
+    const withProtocol = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+    return withProtocol.replace(/\/+$/, "");
+  }
+
+  function getClientSessionId() {
+    try {
+      const existing = sessionStorage.getItem("raaft-io-session-id");
+      if (existing) return existing;
+      const id = `player-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+      sessionStorage.setItem("raaft-io-session-id", id);
+      return id;
+    } catch {
+      return `player-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+    }
+  }
 
   const state = createWorld();
 
@@ -1215,10 +1247,12 @@
   function playerNetState(id = serverPlayerId || localPeerId) {
     return {
       id,
+      clientId: localPeerId,
       name: playerName,
       x: state.player.x,
       y: state.player.y,
       facing: state.player.facing,
+      spawnedAt: serverSpawnStamp || 0,
       level: state.player.level,
       xp: state.player.totalXp || 0,
       health: state.player.health,
@@ -1411,7 +1445,11 @@
   }
 
   async function joinServerMode({ resetView = true, quiet = false } = {}) {
-    const local = playerNetState(localPeerId);
+    const local = {
+      ...playerNetState(serverPlayerId || localPeerId),
+      clientId: localPeerId,
+      resume: !resetView || serverEverConnected || localSpawnApplied
+    };
     if (resetView) {
       scoreboardRows = [local];
       remotePlayers = [];
@@ -1725,10 +1763,12 @@
     const spawnedAt = cleanCoord(serverPlayer.spawnedAt, 0);
     if (spawnedAt && spawnedAt !== serverSpawnStamp) {
       serverSpawnStamp = spawnedAt;
-      state.player.x = clamp(cleanCoord(serverPlayer.x, state.player.x), 80, WORLD - 80);
-      state.player.y = clamp(cleanCoord(serverPlayer.y, state.player.y), 80, WORLD - 80);
-      state.camera.x = state.player.x;
-      state.camera.y = state.player.y;
+      if (!serverEverConnected) {
+        state.player.x = clamp(cleanCoord(serverPlayer.x, state.player.x), 80, WORLD - 80);
+        state.player.y = clamp(cleanCoord(serverPlayer.y, state.player.y), 80, WORLD - 80);
+        state.camera.x = state.player.x;
+        state.camera.y = state.player.y;
+      }
     }
     if (devMode) return;
     const serverHealth = clamp(cleanCoord(serverPlayer.health, state.player.health), 0, 100);
