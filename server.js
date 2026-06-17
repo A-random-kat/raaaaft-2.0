@@ -345,6 +345,7 @@ function sanitizeWorld(world) {
     respawn: clamp(cleanNumber(tree?.respawn, 0), 0, 1200)
   }));
   return {
+    version: Math.max(0, Math.floor(cleanNumber(world.version, 0))),
     raftOffset: {
       x: clamp(cleanNumber(world.raftOffset?.x, 0), 0, WORLD),
       y: clamp(cleanNumber(world.raftOffset?.y, 0), 0, WORLD)

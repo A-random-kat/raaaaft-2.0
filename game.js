@@ -195,6 +195,7 @@
   let serverSyncInFlight = false;
   let nextServerObjectId = 1;
   let localSpawnApplied = false;
+  let localWorldVersion = 0;
   let pendingRemoteRaftMoves = new Map();
   let pendingPlayerHits = [];
   let pendingWorldCommands = [];
@@ -204,6 +205,10 @@
   let localPeerId = getClientSessionId();
   const localPeers = new Map();
   let lastHudRender = 0;
+
+  function bumpLocalWorldVersion() {
+    localWorldVersion += 1;
+  }
 
   function resolveServerApiRoot() {
     let explicit = "";
@@ -614,6 +619,7 @@
     serverMisses = 0;
     serverEverConnected = false;
     localSpawnApplied = false;
+    localWorldVersion = 0;
     lastHudRender = 0;
     localPeers.clear();
     serverAggressiveSharks = [];
@@ -1270,6 +1276,7 @@
 
   function serializeServerWorld() {
     return {
+      version: localWorldVersion,
       raftOffset: { x: state.raftOffset.x, y: state.raftOffset.y },
       raft: state.raft.map((rt) => ({ gx: rt.gx, gy: rt.gy, hp: rt.hp, maxHp: rt.maxHp })),
       structures: state.structures.map((st) => ({
@@ -1575,6 +1582,7 @@
         st.y += dy;
       }
     }
+    bumpLocalWorldVersion();
   }
 
   function ensureLocalChannel() {
@@ -1679,6 +1687,7 @@
 
   function normalizeRemoteWorld(world, ownerId = null) {
     return {
+      version: cleanCoord(world.version, 0),
       raftOffset: {
         x: cleanCoord(world.raftOffset?.x, 0),
         y: cleanCoord(world.raftOffset?.y, 0)
@@ -1712,6 +1721,8 @@
   function applyOwnServerWorld(world) {
     if (!world || !Array.isArray(world.raft) || !world.raftOffset) return;
     const normalized = normalizeRemoteWorld(world, null);
+    if (normalized.version < localWorldVersion) return;
+    localWorldVersion = Math.max(localWorldVersion, normalized.version);
     const activeId = activeCannon?.serverObjectId || activeCannon?.id || null;
     const openChestId = openChest?.serverObjectId || openChest?.id || null;
     state.raftOffset.x = normalized.raftOffset.x;
@@ -2019,6 +2030,7 @@
         st.y += dy;
       }
     }
+    bumpLocalWorldVersion();
     return true;
   }
 
@@ -2390,14 +2402,17 @@
     const st = structureOnTile(rt);
     if (st) {
       st.hp -= amount;
+      bumpLocalWorldVersion();
       burst(st.x, st.y, st.type === "torch" ? "#ffb44c" : "#ff7482", 7);
       if (st.hp <= 0) {
         state.structures = state.structures.filter((item) => item !== st);
+        bumpLocalWorldVersion();
         toast(`${label(st.type)} broke.`);
       }
       return;
     }
     rt.hp -= amount;
+    bumpLocalWorldVersion();
   }
 
   function nearestRaftTile(from) {
@@ -2425,6 +2440,7 @@
     state.structures = state.structures.filter((st) => !doomed.includes(st));
     if (doomed.includes(activeCannon)) activeCannon = null;
     state.raft = state.raft.filter((tile) => tile !== rt);
+    bumpLocalWorldVersion();
     burst(raftTileRect(rt).x + TILE / 2, raftTileRect(rt).y + TILE / 2, "#d89a54", 14);
   }
 
@@ -3341,6 +3357,7 @@
         state.raftOffset.x = spot.x - TILE / 2;
         state.raftOffset.y = spot.y - TILE / 2;
         state.raft.push(tile(0, 0, "deck"));
+        bumpLocalWorldVersion();
         consumeBuild(buildChoice);
         toast("New raft started.");
         gainXp(6);
@@ -3352,6 +3369,7 @@
       const adjacent = state.raft.some((rt) => Math.abs(rt.gx - gx) + Math.abs(rt.gy - gy) === 1);
       if (!adjacent) return toast("New raft tiles must touch your raft.");
       state.raft.push(tile(gx, gy, "deck"));
+      bumpLocalWorldVersion();
       consumeBuild(buildChoice);
       toast("Raft expanded.");
       gainXp(6);
@@ -3363,6 +3381,7 @@
     const candidate = createStructure(buildChoice, spot.x, spot.y, angle, site.kind);
     if (state.structures.some((s) => placementFootprintsOverlap(candidate, s))) return toast("That spot is occupied.");
     state.structures.push(candidate);
+    bumpLocalWorldVersion();
     consumeBuild(buildChoice);
     toast(`${label(buildChoice)} placed.`);
     gainXp(8);
