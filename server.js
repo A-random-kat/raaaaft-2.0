@@ -237,9 +237,10 @@ function raftCenter(world) {
   return { x: (b.minX + b.maxX) / 2, y: (b.minY + b.maxY) / 2 };
 }
 
-function isSpawnClear(point) {
+function isSpawnClear(point, ignoreId = null) {
   if (SERVER_ISLANDS.some((island) => Math.hypot(point.x - island.x, point.y - island.y) < island.r + 260)) return false;
   for (const player of activePlayers()) {
+    if (ignoreId && player.id === ignoreId) continue;
     if (Math.hypot(point.x - player.x, point.y - player.y) < SPAWN_CLEARANCE) return false;
     const stored = players.get(player.id);
     if (stored?.world && Math.hypot(point.x - raftCenter(stored.world).x, point.y - raftCenter(stored.world).y) < SPAWN_CLEARANCE) return false;
@@ -247,14 +248,14 @@ function isSpawnClear(point) {
   return true;
 }
 
-function chooseSpawnPoint(preferred = null) {
-  if (preferred && isSpawnClear(preferred)) return preferred;
+function chooseSpawnPoint(preferred = null, ignoreId = null) {
+  if (preferred && isSpawnClear(preferred, ignoreId)) return preferred;
   for (const point of SPAWN_POINTS) {
-    if (isSpawnClear(point)) return point;
+    if (isSpawnClear(point, ignoreId)) return point;
   }
   for (let i = 0; i < 100; i++) {
     const point = { x: 420 + Math.random() * (WORLD - 840), y: 420 + Math.random() * (WORLD - 840) };
-    if (isSpawnClear(point)) return point;
+    if (isSpawnClear(point, ignoreId)) return point;
   }
   return { x: 520 + Math.random() * 600, y: 520 + Math.random() * 600 };
 }
@@ -270,11 +271,15 @@ function shiftWorldToSpawn(world, player, spawn) {
     st.x = clamp(st.x + dx, 0, WORLD);
     st.y = clamp(st.y + dy, 0, WORLD);
   }
-  player.x = clamp(player.x + dx, 80, WORLD - 80);
-  player.y = clamp(player.y + dy, 80, WORLD - 80);
   if (!world.raft?.length) {
     world.raftOffset.x = spawn.x - TILE / 2;
     world.raftOffset.y = spawn.y - TILE / 2;
+    player.x = clamp(spawn.x, 80, WORLD - 80);
+    player.y = clamp(spawn.y, 80, WORLD - 80);
+  } else {
+    const centerAfterShift = raftCenter(world);
+    player.x = clamp(centerAfterShift.x, 80, WORLD - 80);
+    player.y = clamp(centerAfterShift.y, 80, WORLD - 80);
   }
   player.spawnedAt = Date.now();
 }
@@ -633,7 +638,7 @@ const server = http.createServer(async (req, res) => {
     const player = playerFromBody(id, body, existing || {});
     if (!shouldResume) {
       const preferred = player.world ? raftCenter(player.world) : { x: player.x, y: player.y };
-      shiftWorldToSpawn(player.world, player, chooseSpawnPoint(preferred));
+      shiftWorldToSpawn(player.world, player, chooseSpawnPoint(preferred, id));
     } else if (!player.spawnedAt) {
       player.spawnedAt = Date.now();
     }

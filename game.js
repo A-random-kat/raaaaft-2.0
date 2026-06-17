@@ -172,6 +172,7 @@
   let cast = null;
   let rowingTimer = 0;
   let rowingDurabilityTimer = 0;
+  let raftRowVel = { x: 0, y: 0 };
   let waveTime = 0;
   let gameStarted = false;
   let playerName = "Captain";
@@ -303,7 +304,7 @@
         bandage: 0
       },
       camera: { x: player.x, y: player.y },
-      raftOffset: { x: player.x - TILE * 0.5, y: player.y - TILE * 0.5 },
+      raftOffset: { x: player.x - TILE, y: player.y - TILE },
       sharks: createSharks(player),
       crocTimer: rnd(90, 170),
       unlocks: { axe: "wood", spear: "wood", hammer: "wood" },
@@ -415,8 +416,8 @@
     state.player.y = spawn.y;
     state.camera.x = spawn.x;
     state.camera.y = spawn.y;
-    state.raftOffset.x = spawn.x - TILE * 0.5;
-    state.raftOffset.y = spawn.y - TILE * 0.5;
+    centerOwnRaftAt(spawn, false);
+    placePlayerOnOwnRaft(true);
     state.sharks = createSharks(state.player, state.islands);
   }
 
@@ -600,6 +601,7 @@
     cast = null;
     rowingTimer = 0;
     resetHotbarItems();
+    raftRowVel = { x: 0, y: 0 };
     syncManagedCountsFromSlots();
     if (devMode) applyDevToken();
     buildMode = false;
@@ -1424,8 +1426,8 @@
     if (data.id) serverPlayerId = data.id;
     usingLocalMultiplayer = false;
     localPeers.clear();
-    applyServerPlayerState((data.players || []).find((p) => p.id === serverPlayerId));
     applyOwnServerWorld(data.worlds?.[serverPlayerId]);
+    applyServerPlayerState((data.players || []).find((p) => p.id === serverPlayerId));
     remotePlayers = (data.players || []).filter((p) => p.id !== serverPlayerId);
     applyRemoteWorlds(data.worlds || {}, serverPlayerId);
     serverAggressiveSharks = data.serverSharks || [];
@@ -1523,8 +1525,7 @@
 
   function applyLocalFallbackSpawn() {
     if (localSpawnApplied) return;
-    const spawn = chooseLocalSpawnPoint();
-    shiftLocalWorldToSpawn(spawn);
+    placePlayerOnOwnRaft(true);
     localSpawnApplied = true;
   }
 
@@ -1566,14 +1567,20 @@
     return { x: (minX + maxX) / 2, y: (minY + maxY) / 2 };
   }
 
-  function shiftLocalWorldToSpawn(spawn) {
-    const center = remoteWorldCenter({ raftOffset: state.raftOffset, raft: state.raft });
-    const dx = spawn.x - center.x;
-    const dy = spawn.y - center.y;
-    state.player.x = clamp(state.player.x + dx, 80, WORLD - 80);
-    state.player.y = clamp(state.player.y + dy, 80, WORLD - 80);
-    state.camera.x = state.player.x;
-    state.camera.y = state.player.y;
+  function ownRaftCenter() {
+    return remoteWorldCenter({ raftOffset: state.raftOffset, raft: state.raft });
+  }
+
+  function centerOwnRaftAt(point, bump = true) {
+    if (!state.raft.length) {
+      state.raftOffset.x = point.x - TILE / 2;
+      state.raftOffset.y = point.y - TILE / 2;
+      if (bump) bumpLocalWorldVersion();
+      return;
+    }
+    const center = ownRaftCenter();
+    const dx = point.x - center.x;
+    const dy = point.y - center.y;
     state.raftOffset.x += dx;
     state.raftOffset.y += dy;
     for (const st of state.structures) {
@@ -1582,7 +1589,25 @@
         st.y += dy;
       }
     }
-    bumpLocalWorldVersion();
+    if (bump) bumpLocalWorldVersion();
+  }
+
+  function placePlayerOnOwnRaft(snapCamera = false) {
+    if (!state.raft.length) return false;
+    const center = ownRaftCenter();
+    state.player.x = clamp(center.x, 80, WORLD - 80);
+    state.player.y = clamp(center.y, 80, WORLD - 80);
+    state.player.swimTime = 0;
+    if (snapCamera) {
+      state.camera.x = state.player.x;
+      state.camera.y = state.player.y;
+    }
+    return true;
+  }
+
+  function shiftLocalWorldToSpawn(spawn) {
+    centerOwnRaftAt(spawn);
+    placePlayerOnOwnRaft(true);
   }
 
   function ensureLocalChannel() {
@@ -1721,7 +1746,9 @@
   function applyOwnServerWorld(world) {
     if (!world || !Array.isArray(world.raft) || !world.raftOffset) return;
     const normalized = normalizeRemoteWorld(world, null);
+    const offsetGap = Math.hypot(normalized.raftOffset.x - state.raftOffset.x, normalized.raftOffset.y - state.raftOffset.y);
     if (normalized.version < localWorldVersion) return;
+    if (localWorldVersion > 0 && normalized.version === localWorldVersion && offsetGap > 24 && serverEverConnected) return;
     localWorldVersion = Math.max(localWorldVersion, normalized.version);
     const activeId = activeCannon?.serverObjectId || activeCannon?.id || null;
     const openChestId = openChest?.serverObjectId || openChest?.id || null;
@@ -1775,10 +1802,12 @@
     if (spawnedAt && spawnedAt !== serverSpawnStamp) {
       serverSpawnStamp = spawnedAt;
       if (!serverEverConnected) {
-        state.player.x = clamp(cleanCoord(serverPlayer.x, state.player.x), 80, WORLD - 80);
-        state.player.y = clamp(cleanCoord(serverPlayer.y, state.player.y), 80, WORLD - 80);
-        state.camera.x = state.player.x;
-        state.camera.y = state.player.y;
+        if (!placePlayerOnOwnRaft(true)) {
+          state.player.x = clamp(cleanCoord(serverPlayer.x, state.player.x), 80, WORLD - 80);
+          state.player.y = clamp(cleanCoord(serverPlayer.y, state.player.y), 80, WORLD - 80);
+          state.camera.x = state.player.x;
+          state.camera.y = state.player.y;
+        }
       }
     }
     if (devMode) return;
@@ -1904,11 +1933,18 @@
     const boardedRaft = raftBoardingAt(p);
     if (boardedRaft && hotbar[selected].id === "oar" && mouse.down) {
       if (!spendStamina(0.18, false)) {
+        raftRowVel.x = 0;
+        raftRowVel.y = 0;
         rowingTimer = Math.max(0, rowingTimer - dt * 7);
       } else {
         const a = angleTo(screenCenterWorld(), mouseWorld());
-        const dx = Math.cos(a) * 72 * dt;
-        const dy = Math.sin(a) * 72 * dt;
+        const targetVx = Math.cos(a) * 78;
+        const targetVy = Math.sin(a) * 78;
+        const rowEase = clamp(dt * 7.5, 0, 1);
+        raftRowVel.x += (targetVx - raftRowVel.x) * rowEase;
+        raftRowVel.y += (targetVy - raftRowVel.y) * rowEase;
+        const dx = raftRowVel.x * dt;
+        const dy = raftRowVel.y * dt;
         const moved = boardedRaft.local ? moveRaft(dx, dy) : moveRemoteRaft(boardedRaft, dx, dy);
         if (moved) {
           p.x += dx;
@@ -1919,9 +1955,14 @@
             rowingDurabilityTimer = 0;
             useItemDurability();
           }
+        } else {
+          raftRowVel.x *= 0.35;
+          raftRowVel.y *= 0.35;
         }
       }
     } else {
+      raftRowVel.x = 0;
+      raftRowVel.y = 0;
       rowingTimer = Math.max(0, rowingTimer - dt * 7);
       rowingDurabilityTimer = 0;
     }
