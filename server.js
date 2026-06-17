@@ -48,6 +48,7 @@ const SERVER_SHARK_DAMAGE = 36;
 const SERVER_SHARK_BITE_MS = 1300;
 const TOMBSTONE_MS = 5000;
 const MAX_BODY_BYTES = 5_000_000;
+const ACTIVE_PLAYER_TIMEOUT_MS = 45_000;
 const players = new Map();
 let lastSharkTick = Date.now();
 let lastWorldTick = Date.now();
@@ -529,6 +530,16 @@ function serverProjectileState() {
   return serverProjectiles.map(({ id, type, x, y, vx, vy, life, damage, radius }) => ({ id, type, x, y, vx, vy, life, damage, radius }));
 }
 
+function publicWorld(world) {
+  if (!world) return null;
+  return {
+    version: Math.max(0, Math.floor(cleanNumber(world.version, 0))),
+    raftOffset: world.raftOffset,
+    raft: world.raft || [],
+    structures: world.structures || []
+  };
+}
+
 function playerFromBody(id, body, existing = {}) {
   const destroyedStructures = cleanTombstones(existing.destroyedStructures);
   const destroyedTiles = cleanTombstones(existing.destroyedTiles);
@@ -557,7 +568,7 @@ function playerFromBody(id, body, existing = {}) {
 function activePlayers() {
   const now = Date.now();
   for (const [id, player] of players) {
-    if (now - player.seen > 15_000) players.delete(id);
+    if (now - player.seen > ACTIVE_PLAYER_TIMEOUT_MS) players.delete(id);
   }
   return [...players.values()].map(({ id, name, level, xp, health, stamina, onIsland, onRaft, selectedItem, x, y, facing, spawnedAt }) => ({ id, name, level, xp, health, stamina, onIsland, onRaft, selectedItem, x, y, facing, spawnedAt }));
 }
@@ -614,7 +625,7 @@ function activeWorlds() {
   const worlds = {};
   for (const player of activePlayers()) {
     const stored = players.get(player.id);
-    if (stored?.world) worlds[player.id] = stored.world;
+    if (stored?.world) worlds[player.id] = publicWorld(stored.world);
   }
   return worlds;
 }

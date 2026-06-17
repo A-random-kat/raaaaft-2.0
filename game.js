@@ -34,8 +34,8 @@
   const TREE_COLLISION_RADIUS = 18;
   const INITIAL_DEBRIS = 150;
   const DEBRIS_TARGET = 140;
-  const SERVER_SYNC_INTERVAL = 0.7;
-  const SERVER_REQUEST_TIMEOUT = 8000;
+  const SERVER_SYNC_INTERVAL = 1;
+  const SERVER_REQUEST_TIMEOUT = 15000;
   const SPAWN_CLEARANCE = 520;
   const SPAWN_POINTS = [
     { x: 520, y: 520 },
@@ -762,7 +762,8 @@
     const canonical = canonicalToolId(id);
     if (SINGLE_TIER_TOOLS.includes(canonical)) {
       const names = { rod: "Wood Rod", oar: "Wood Oar", musket: "Wood Musket" };
-      return { id: canonical, base: canonical, tier: "wood", label: names[canonical], durability: TOOL_TIERS.wood.durability, power: 1, color: TOOL_TIERS.wood.color, single: true };
+      const durability = canonical === "oar" ? TOOL_TIERS.wood.durability * 2 : TOOL_TIERS.wood.durability;
+      return { id: canonical, base: canonical, tier: "wood", label: names[canonical], durability, power: 1, color: TOOL_TIERS.wood.color, single: true };
     }
     const match = /^(wood|scrap|iron|steel)(Axe|Spear|Hammer)$/.exec(canonical);
     if (!match) return null;
@@ -1252,7 +1253,7 @@
     }
   }
 
-  function playerNetState(id = serverPlayerId || localPeerId) {
+  function playerNetState(id = serverPlayerId || localPeerId, options = {}) {
     return {
       id,
       clientId: localPeerId,
@@ -1268,7 +1269,7 @@
       onIsland: Boolean(isOnIsland(state.player)),
       onRaft: Boolean(isOnRaft(state.player)),
       selectedItem: buildMode ? buildChoice : hotbar[selected]?.id || "empty",
-      world: serializeServerWorld(),
+      world: serializeServerWorld(Boolean(options.fullWorld)),
       raftCommands: consumeRemoteRaftMoves(),
       playerHits: consumePlayerHits(),
       worldCommands: consumeWorldCommands(),
@@ -1276,8 +1277,8 @@
     };
   }
 
-  function serializeServerWorld() {
-    return {
+  function serializeServerWorld(fullWorld = false) {
+    const world = {
       version: localWorldVersion,
       raftOffset: { x: state.raftOffset.x, y: state.raftOffset.y },
       raft: state.raft.map((rt) => ({ gx: rt.gx, gy: rt.gy, hp: rt.hp, maxHp: rt.maxHp })),
@@ -1292,7 +1293,11 @@
         maxHp: st.maxHp,
         hitbox: footprint(st.type),
         storage: st.type === "chest" ? chestSlots(st) : null
-      })),
+      }))
+    };
+    if (!fullWorld) return world;
+    return {
+      ...world,
       animals: state.animals.map((a) => ({
         id: serverObjectId("animal", a),
         type: a.type,
@@ -1448,6 +1453,10 @@
     serverMisses += 1;
     serverRetryDelay = clamp(serverRetryDelay * 1.6, 1, 8);
     serverRetryTimer = serverRetryDelay;
+    if (serverPlayerId) {
+      if (serverMisses === 1) toast("Connection hiccup. Reconnecting...");
+      return;
+    }
     usingLocalMultiplayer = true;
     updateLocalMultiplayer(true);
     if (serverMisses === 1) toast("Connection hiccup. Reconnecting...");
@@ -1455,7 +1464,7 @@
 
   async function joinServerMode({ resetView = true, quiet = false } = {}) {
     const local = {
-      ...playerNetState(serverPlayerId || localPeerId),
+      ...playerNetState(serverPlayerId || localPeerId, { fullWorld: true }),
       clientId: localPeerId,
       resume: !resetView || serverEverConnected || localSpawnApplied
     };
@@ -1492,8 +1501,8 @@
       }
       return;
     }
-    if (usingLocalMultiplayer && serverRetryTimer > 0) {
-      updateLocalMultiplayer(true);
+    if (serverRetryTimer > 0) {
+      if (usingLocalMultiplayer) updateLocalMultiplayer(true);
       return;
     }
     if (serverSyncTimer < SERVER_SYNC_INTERVAL) {
@@ -1752,6 +1761,9 @@
     localWorldVersion = Math.max(localWorldVersion, normalized.version);
     const activeId = activeCannon?.serverObjectId || activeCannon?.id || null;
     const openChestId = openChest?.serverObjectId || openChest?.id || null;
+    const wasOnOwnRaft = Boolean(raftAt(state.player.x, state.player.y));
+    const dx = normalized.raftOffset.x - state.raftOffset.x;
+    const dy = normalized.raftOffset.y - state.raftOffset.y;
     state.raftOffset.x = normalized.raftOffset.x;
     state.raftOffset.y = normalized.raftOffset.y;
     state.raft = normalized.raft.map((rt) => ({ ...rt, type: "deck" }));
@@ -1761,6 +1773,15 @@
       delete local.remoteOwnerId;
       return local;
     });
+    if (wasOnOwnRaft && (Math.abs(dx) > 0.01 || Math.abs(dy) > 0.01)) {
+      state.player.x = clamp(state.player.x + dx, 80, WORLD - 80);
+      state.player.y = clamp(state.player.y + dy, 80, WORLD - 80);
+      state.camera.x += dx;
+      state.camera.y += dy;
+    }
+    if (!raftAt(state.player.x, state.player.y) && dist(state.player, ownRaftCenter()) < TILE * 2.4) {
+      placePlayerOnOwnRaft(false);
+    }
     if (activeId) activeCannon = state.structures.find((st) => (st.serverObjectId || st.id) === activeId) || null;
     if (openChestId) openChest = state.structures.find((st) => (st.serverObjectId || st.id) === openChestId) || null;
   }
