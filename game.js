@@ -35,7 +35,7 @@
   const INITIAL_DEBRIS = 150;
   const DEBRIS_TARGET = 140;
   const SERVER_SYNC_INTERVAL = 1;
-  const SERVER_REQUEST_TIMEOUT = 15000;
+  const SERVER_REQUEST_TIMEOUT = 25000;
   const SPAWN_CLEARANCE = 520;
   const SPAWN_POINTS = [
     { x: 520, y: 520 },
@@ -232,15 +232,8 @@
   }
 
   function getClientSessionId() {
-    try {
-      const existing = sessionStorage.getItem("raaft-io-session-id");
-      if (existing) return existing;
-      const id = `player-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
-      sessionStorage.setItem("raaft-io-session-id", id);
-      return id;
-    } catch {
-      return `player-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
-    }
+    const randomId = globalThis.crypto?.randomUUID?.() || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+    return `player-${randomId}`;
   }
 
   const state = createWorld();
@@ -1431,8 +1424,11 @@
     if (data.id) serverPlayerId = data.id;
     usingLocalMultiplayer = false;
     localPeers.clear();
-    applyOwnServerWorld(data.worlds?.[serverPlayerId]);
-    applyServerPlayerState((data.players || []).find((p) => p.id === serverPlayerId));
+    const ownServerPlayer = (data.players || []).find((p) => p.id === serverPlayerId);
+    const incomingSpawnStamp = cleanCoord(ownServerPlayer?.spawnedAt, 0);
+    const forceOwnTransform = Boolean(incomingSpawnStamp && incomingSpawnStamp !== serverSpawnStamp);
+    applyOwnServerWorld(data.worlds?.[serverPlayerId], forceOwnTransform);
+    applyServerPlayerState(ownServerPlayer);
     remotePlayers = (data.players || []).filter((p) => p.id !== serverPlayerId);
     applyRemoteWorlds(data.worlds || {}, serverPlayerId);
     serverAggressiveSharks = data.serverSharks || [];
@@ -1454,19 +1450,19 @@
     serverRetryDelay = clamp(serverRetryDelay * 1.6, 1, 8);
     serverRetryTimer = serverRetryDelay;
     if (serverPlayerId) {
-      if (serverMisses === 1) toast("Connection hiccup. Reconnecting...");
+      if (serverMisses === 3) toast("Connection interrupted. Reconnecting...");
       return;
     }
     usingLocalMultiplayer = true;
     updateLocalMultiplayer(true);
-    if (serverMisses === 1) toast("Connection hiccup. Reconnecting...");
+    if (serverMisses === 1) toast("Server unavailable. Retrying...");
   }
 
   async function joinServerMode({ resetView = true, quiet = false } = {}) {
     const local = {
-      ...playerNetState(serverPlayerId || localPeerId, { fullWorld: true }),
+      ...playerNetState(serverPlayerId || localPeerId),
       clientId: localPeerId,
-      resume: !resetView || serverEverConnected || localSpawnApplied
+      resume: serverEverConnected
     };
     if (resetView) {
       scoreboardRows = [local];
@@ -1752,36 +1748,33 @@
     };
   }
 
-  function applyOwnServerWorld(world) {
+  function applyOwnServerWorld(world, forceTransform = false) {
     if (!world || !Array.isArray(world.raft) || !world.raftOffset) return;
     const normalized = normalizeRemoteWorld(world, null);
-    const offsetGap = Math.hypot(normalized.raftOffset.x - state.raftOffset.x, normalized.raftOffset.y - state.raftOffset.y);
-    if (normalized.version < localWorldVersion) return;
-    if (localWorldVersion > 0 && normalized.version === localWorldVersion && offsetGap > 24 && serverEverConnected) return;
+    if (!forceTransform && normalized.version < localWorldVersion) return;
     localWorldVersion = Math.max(localWorldVersion, normalized.version);
     const activeId = activeCannon?.serverObjectId || activeCannon?.id || null;
     const openChestId = openChest?.serverObjectId || openChest?.id || null;
-    const wasOnOwnRaft = Boolean(raftAt(state.player.x, state.player.y));
-    const dx = normalized.raftOffset.x - state.raftOffset.x;
-    const dy = normalized.raftOffset.y - state.raftOffset.y;
-    state.raftOffset.x = normalized.raftOffset.x;
-    state.raftOffset.y = normalized.raftOffset.y;
+    const preserveLocalTransform = serverEverConnected && !forceTransform;
+    const raftShiftX = preserveLocalTransform ? state.raftOffset.x - normalized.raftOffset.x : 0;
+    const raftShiftY = preserveLocalTransform ? state.raftOffset.y - normalized.raftOffset.y : 0;
+    if (!preserveLocalTransform) {
+      state.raftOffset.x = normalized.raftOffset.x;
+      state.raftOffset.y = normalized.raftOffset.y;
+    }
     state.raft = normalized.raft.map((rt) => ({ ...rt, type: "deck" }));
     state.structures = normalized.structures.map((st) => {
-      const local = { ...st, base: st.base || "raft" };
+      const base = st.base || "raft";
+      const local = {
+        ...st,
+        base,
+        x: st.x + (preserveLocalTransform && base === "raft" ? raftShiftX : 0),
+        y: st.y + (preserveLocalTransform && base === "raft" ? raftShiftY : 0)
+      };
       local.serverObjectId = st.id;
       delete local.remoteOwnerId;
       return local;
     });
-    if (wasOnOwnRaft && (Math.abs(dx) > 0.01 || Math.abs(dy) > 0.01)) {
-      state.player.x = clamp(state.player.x + dx, 80, WORLD - 80);
-      state.player.y = clamp(state.player.y + dy, 80, WORLD - 80);
-      state.camera.x += dx;
-      state.camera.y += dy;
-    }
-    if (!raftAt(state.player.x, state.player.y) && dist(state.player, ownRaftCenter()) < TILE * 2.4) {
-      placePlayerOnOwnRaft(false);
-    }
     if (activeId) activeCannon = state.structures.find((st) => (st.serverObjectId || st.id) === activeId) || null;
     if (openChestId) openChest = state.structures.find((st) => (st.serverObjectId || st.id) === openChestId) || null;
   }
@@ -1822,13 +1815,11 @@
     const spawnedAt = cleanCoord(serverPlayer.spawnedAt, 0);
     if (spawnedAt && spawnedAt !== serverSpawnStamp) {
       serverSpawnStamp = spawnedAt;
-      if (!serverEverConnected) {
-        if (!placePlayerOnOwnRaft(true)) {
-          state.player.x = clamp(cleanCoord(serverPlayer.x, state.player.x), 80, WORLD - 80);
-          state.player.y = clamp(cleanCoord(serverPlayer.y, state.player.y), 80, WORLD - 80);
-          state.camera.x = state.player.x;
-          state.camera.y = state.player.y;
-        }
+      if (!placePlayerOnOwnRaft(true)) {
+        state.player.x = clamp(cleanCoord(serverPlayer.x, state.player.x), 80, WORLD - 80);
+        state.player.y = clamp(cleanCoord(serverPlayer.y, state.player.y), 80, WORLD - 80);
+        state.camera.x = state.player.x;
+        state.camera.y = state.player.y;
       }
     }
     if (devMode) return;
