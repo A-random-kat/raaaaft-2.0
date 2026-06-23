@@ -291,6 +291,7 @@ function mergeWorld(existingPlayer, incoming) {
   if (!existingPlayer?.world) return incoming;
 
   const oldStructures = new Map(existingPlayer.world.structures.map((item) => [item.id, item]));
+  const incomingStructureIds = new Set(incoming.structures.map((item) => item.id));
   for (const structure of incoming.structures) {
     const old = oldStructures.get(structure.id);
     if (!old) continue;
@@ -306,23 +307,32 @@ function mergeWorld(existingPlayer, incoming) {
     structure.cooldown = Math.max(structure.cooldown, old.cooldown);
     if (structure.type === "chest" && old.storage) structure.storage = structure.storage || old.storage;
   }
+  for (const old of existingPlayer.world.structures) {
+    if (!incomingStructureIds.has(old.id) && !destroyedStructures.has(old.id)) incoming.structures.push(old);
+  }
 
   const oldTiles = new Map(existingPlayer.world.raft.map((tile) => [tileKey(tile), tile]));
+  const incomingTileKeys = new Set(incoming.raft.map(tileKey));
   for (const tile of incoming.raft) {
     const old = oldTiles.get(tileKey(tile));
     if (old) tile.hp = Math.min(tile.hp, old.hp);
+  }
+  for (const old of existingPlayer.world.raft) {
+    const key = tileKey(old);
+    if (!incomingTileKeys.has(key) && !destroyedTiles.has(key)) incoming.raft.push(old);
   }
   return incoming;
 }
 
 function playerFromBody(id, body, existing = null) {
   const world = mergeWorld(existing, sanitizeWorld(body.world || existing?.world));
+  const submittedHealth = clamp(number(body.health, existing?.health || 100), 0, 100);
   return {
     id,
     name: String(body.name || existing?.name || "Player").slice(0, 18),
     level: Math.max(1, Math.floor(number(body.level, existing?.level || 1))),
     xp: Math.max(0, number(body.xp, existing?.xp || 0)),
-    health: clamp(number(body.health, existing?.health || 100), 0, 100),
+    health: existing ? Math.min(submittedHealth, existing.health) : submittedHealth,
     stamina: clamp(number(body.stamina, existing?.stamina || 100), 0, 100),
     selectedItem: String(body.selectedItem || existing?.selectedItem || "empty").slice(0, 24),
     x: clamp(number(body.x, existing?.x || WORLD / 2), 0, WORLD),
@@ -331,6 +341,9 @@ function playerFromBody(id, body, existing = null) {
     onIsland: Boolean(body.onIsland),
     onRaft: Boolean(body.onRaft),
     spawnedAt: existing?.spawnedAt || number(body.spawnedAt),
+    crewId: existing?.crewId || id,
+    teleportAt: existing?.teleportAt || 0,
+    damagedAt: existing?.damagedAt || 0,
     seen: Date.now(),
     world,
     destroyedStructures: cleanTombstones(existing?.destroyedStructures),
@@ -352,8 +365,20 @@ function publicPlayers() {
     facing: player.facing,
     onIsland: player.onIsland,
     onRaft: player.onRaft,
-    spawnedAt: player.spawnedAt
+    spawnedAt: player.spawnedAt,
+    crewId: player.crewId || player.id,
+    teleportAt: player.teleportAt || 0
   }));
+}
+
+function crewOwner(player) {
+  if (!player) return null;
+  return players.get(player.crewId || player.id) || player;
+}
+
+function sameCrew(a, b) {
+  if (!a || !b) return false;
+  return (a.crewId || a.id) === (b.crewId || b.id);
 }
 
 function publicWorlds(viewerId) {
@@ -362,6 +387,7 @@ function publicWorlds(viewerId) {
   const active = activePlayerRecords().sort((a, b) => (a.id === viewerId ? -1 : b.id === viewerId ? 1 : 0));
   let included = 0;
   for (const player of active) {
+    if ((player.crewId || player.id) !== player.id) continue;
     if (player.id !== viewerId && viewer && distance(player, viewer) > 3200) continue;
     if (player.world) result[player.id] = player.world;
     included += 1;
@@ -371,8 +397,22 @@ function publicWorlds(viewerId) {
 }
 
 function scoreboard() {
-  return publicPlayers()
+  const unique = new Map();
+  for (const player of activePlayerRecords()) {
+    if (player.health <= 0) continue;
+    const key = player.name.trim().toLowerCase() || player.id;
+    const current = unique.get(key);
+    if (!current || player.seen > current.seen) unique.set(key, player);
+  }
+  return [...unique.values()]
     .sort((a, b) => b.xp - a.xp)
+    .map((player) => ({
+      id: player.id,
+      name: player.name,
+      level: player.level,
+      xp: player.xp,
+      health: player.health
+    }))
     .slice(0, 16);
 }
 
@@ -397,10 +437,11 @@ function removeRaftTile(owner, tile) {
   owner.destroyedTiles.set(tileKey(tile), Date.now());
 }
 
-function applyRaftCommands(commands) {
+function applyRaftCommands(actorId, commands) {
+  const actor = players.get(actorId);
   for (const command of Array.isArray(commands) ? commands.slice(0, 24) : []) {
     const owner = players.get(String(command?.ownerId || ""));
-    if (!owner?.world) continue;
+    if (!owner?.world || !sameCrew(actor, owner)) continue;
     const dx = clamp(number(command.dx), -180, 180);
     const dy = clamp(number(command.dy), -180, 180);
     owner.world.raftOffset.x = clamp(owner.world.raftOffset.x + dx, 0, WORLD - TILE);
@@ -414,7 +455,8 @@ function applyRaftCommands(commands) {
   }
 }
 
-function applyWorldCommands(commands) {
+function applyWorldCommands(actorId, commands) {
+  const actor = players.get(actorId);
   for (const command of Array.isArray(commands) ? commands.slice(0, 80) : []) {
     const owner = players.get(String(command?.ownerId || ""));
     if (!owner?.world) continue;
@@ -431,6 +473,7 @@ function applyWorldCommands(commands) {
       tile.hp = clamp(tile.hp - clamp(number(command.damage), 0, 240), 0, tile.maxHp);
       if (tile.hp <= 0) removeRaftTile(owner, tile);
     } else if (command.type === "patchStructure") {
+      if (!sameCrew(actor, owner)) continue;
       const structure = owner.world.structures.find((item) => item.id === String(command.structureId || ""));
       const patch = command.patch;
       if (!structure || !patch || typeof patch !== "object") continue;
@@ -443,18 +486,51 @@ function applyWorldCommands(commands) {
       if (patch.aimOffset !== undefined) structure.aimOffset = clamp(number(patch.aimOffset), -Math.PI / 2, Math.PI / 2);
       if (patch.cooldown !== undefined) structure.cooldown = clamp(number(patch.cooldown), 0, 20);
       if (structure.type === "chest" && Array.isArray(patch.storage)) structure.storage = cleanSlots(patch.storage, 40);
+    } else if (command.type === "addRaftTile") {
+      if (!sameCrew(actor, owner) || owner.world.raft.length >= 300) continue;
+      const tile = {
+        gx: Math.floor(number(command.tile?.gx)),
+        gy: Math.floor(number(command.tile?.gy)),
+        hp: clamp(number(command.tile?.hp, 120), 1, 600),
+        maxHp: clamp(number(command.tile?.maxHp, 120), 1, 600)
+      };
+      if (owner.world.raft.some((item) => item.gx === tile.gx && item.gy === tile.gy)) continue;
+      const adjacent = owner.world.raft.some((item) => Math.abs(item.gx - tile.gx) + Math.abs(item.gy - tile.gy) === 1);
+      if (!adjacent) continue;
+      owner.world.raft.push(tile);
+      owner.world.version = Math.max(owner.world.version + 1, Math.floor(number(command.version, owner.world.version + 1)));
+    } else if (command.type === "addStructure") {
+      if (!sameCrew(actor, owner) || owner.world.structures.length >= 320) continue;
+      const cleaned = sanitizeWorld({
+        version: owner.world.version,
+        raftOffset: owner.world.raftOffset,
+        raft: [],
+        structures: [command.structure]
+      })?.structures?.[0];
+      if (!cleaned?.id || owner.world.structures.some((item) => item.id === cleaned.id)) continue;
+      owner.world.structures.push(cleaned);
+      owner.world.version += 1;
     }
   }
 }
 
 function applyPlayerHits(attackerId, hits) {
+  const attacker = players.get(attackerId);
   for (const hit of Array.isArray(hits) ? hits.slice(0, 24) : []) {
     const targetId = String(hit?.targetId || "");
     if (!targetId || targetId === attackerId) continue;
     const target = players.get(targetId);
     if (!target) continue;
+    if (sameCrew(attacker, target) && hit.friendlyFire === false) continue;
     target.health = clamp(target.health - clamp(number(hit.damage), 0, 120), 0, 100);
+    target.damagedAt = Date.now();
   }
+}
+
+function applyHealing(playerId, amount) {
+  const player = players.get(playerId);
+  if (!player || player.health <= 0) return;
+  player.health = clamp(player.health + clamp(number(amount), 0, 100), 0, 100);
 }
 
 function applyProjectileCommands(commands) {
@@ -474,6 +550,23 @@ function applyProjectileCommands(commands) {
     });
   }
   if (projectiles.length > 160) projectiles = projectiles.slice(-160);
+}
+
+function joinCrew(playerId, targetId) {
+  const player = players.get(playerId);
+  const target = players.get(targetId);
+  if (!player || !target || player.id === target.id || target.health <= 0) return false;
+  const owner = crewOwner(target);
+  if (!owner?.world?.raft?.length) return false;
+  player.crewId = owner.id;
+  const center = raftCenter(owner.world);
+  player.x = clamp(center.x, 80, WORLD - 80);
+  player.y = clamp(center.y, 80, WORLD - 80);
+  player.onRaft = true;
+  player.onIsland = false;
+  player.teleportAt = Date.now();
+  player.seen = Date.now();
+  return true;
 }
 
 function shortAngle(angle) {
@@ -593,16 +686,28 @@ async function handleRequest(req, res) {
 
   if (req.method === "POST" && req.url === "/api/join") {
     const body = await readBody(req);
-    let id = cleanId(body.id || body.clientId);
+    const id = cleanId(body.id || body.clientId);
     const resume = Boolean(body.resume);
-    if (!resume && players.has(id)) id = crypto.randomUUID();
-    const existing = players.get(id) || null;
+    const existing = resume ? players.get(id) || null : null;
     const player = playerFromBody(id, body, existing);
     if (!existing) {
       const preferred = player.world ? raftCenter(player.world) : player;
       shiftWorldToSpawn(player.world, player, chooseSpawn(preferred, id));
     }
     players.set(id, player);
+    tickWorld();
+    sendJson(res, snapshot(id));
+    return;
+  }
+
+  if (req.method === "POST" && req.url === "/api/crew/join") {
+    const body = await readBody(req);
+    const id = cleanId(body.id || body.clientId);
+    const targetId = cleanId(body.targetId);
+    if (!joinCrew(id, targetId)) {
+      sendJson(res, { error: "Unable to join that crew" }, 400);
+      return;
+    }
     tickWorld();
     sendJson(res, snapshot(id));
     return;
@@ -618,8 +723,9 @@ async function handleRequest(req, res) {
       shiftWorldToSpawn(player.world, player, chooseSpawn(preferred, id));
     }
     players.set(id, player);
-    applyRaftCommands(body.raftCommands);
-    applyWorldCommands(body.worldCommands);
+    applyHealing(id, body.healAmount);
+    applyRaftCommands(id, body.raftCommands);
+    applyWorldCommands(id, body.worldCommands);
     applyProjectileCommands(body.projectileCommands);
     applyPlayerHits(id, body.playerHits);
     tickWorld();
@@ -671,5 +777,9 @@ module.exports = {
   playerFromBody,
   raftCenter,
   chooseSpawn,
-  shiftWorldToSpawn
+  shiftWorldToSpawn,
+  scoreboard,
+  joinCrew,
+  applyPlayerHits,
+  applyWorldCommands
 };

@@ -182,6 +182,7 @@
   let serverSyncTimer = 0;
   let scoreboardRows = [];
   let remotePlayers = [];
+  const remotePlayerVisuals = new Map();
   let serverAggressiveSharks = [];
   let serverProjectiles = [];
   let serverRetryTimer = 0;
@@ -197,8 +198,11 @@
   let nextServerObjectId = 1;
   let localSpawnApplied = false;
   let localWorldVersion = 0;
+  let crewOwnerId = null;
+  let serverTeleportStamp = 0;
   let pendingRemoteRaftMoves = new Map();
   let pendingPlayerHits = [];
+  let pendingHealAmount = 0;
   let pendingWorldCommands = [];
   let pendingProjectileCommands = [];
   let localChannel = null;
@@ -209,6 +213,63 @@
 
   function bumpLocalWorldVersion() {
     localWorldVersion += 1;
+  }
+
+  function setRemotePlayers(players) {
+    const active = new Set();
+    for (const raw of players || []) {
+      if (!raw?.id || raw.id === serverPlayerId || raw.id === localPeerId) continue;
+      active.add(raw.id);
+      let visual = remotePlayerVisuals.get(raw.id);
+      if (!visual) {
+        visual = {
+          ...raw,
+          x: cleanCoord(raw.x, 0),
+          y: cleanCoord(raw.y, 0),
+          facing: cleanCoord(raw.facing, 0),
+          targetX: cleanCoord(raw.x, 0),
+          targetY: cleanCoord(raw.y, 0),
+          targetFacing: cleanCoord(raw.facing, 0),
+          teleportStamp: cleanCoord(raw.teleportAt, 0)
+        };
+        remotePlayerVisuals.set(raw.id, visual);
+      } else {
+        const teleportStamp = cleanCoord(raw.teleportAt, 0);
+        const teleported = teleportStamp && teleportStamp !== visual.teleportStamp;
+        const x = cleanCoord(raw.x, visual.targetX);
+        const y = cleanCoord(raw.y, visual.targetY);
+        const renderedX = visual.x;
+        const renderedY = visual.y;
+        const renderedFacing = visual.facing;
+        Object.assign(visual, raw);
+        visual.x = renderedX;
+        visual.y = renderedY;
+        visual.facing = renderedFacing;
+        visual.targetX = x;
+        visual.targetY = y;
+        visual.targetFacing = cleanCoord(raw.facing, visual.targetFacing);
+        visual.teleportStamp = teleportStamp;
+        if (teleported || Math.hypot(x - visual.x, y - visual.y) > 700) {
+          visual.x = x;
+          visual.y = y;
+          visual.facing = visual.targetFacing;
+        }
+      }
+    }
+    for (const id of remotePlayerVisuals.keys()) {
+      if (!active.has(id)) remotePlayerVisuals.delete(id);
+    }
+    remotePlayers = [...remotePlayerVisuals.values()];
+  }
+
+  function updateRemotePlayerMotion(dt) {
+    const positionEase = 1 - Math.exp(-dt * 9);
+    const angleEase = 1 - Math.exp(-dt * 11);
+    for (const player of remotePlayers) {
+      player.x += (player.targetX - player.x) * positionEase;
+      player.y += (player.targetY - player.y) * positionEase;
+      player.facing += shortAngle(player.targetFacing - player.facing) * angleEase;
+    }
   }
 
   function resolveServerApiRoot() {
@@ -615,11 +676,15 @@
     serverEverConnected = false;
     localSpawnApplied = false;
     localWorldVersion = 0;
+    crewOwnerId = null;
+    serverTeleportStamp = 0;
     lastHudRender = 0;
     localPeers.clear();
+    remotePlayerVisuals.clear();
     serverAggressiveSharks = [];
     remoteWorlds.clear();
     pendingRemoteRaftMoves.clear();
+    pendingHealAmount = 0;
     selected = 0;
     keys.clear();
     mouse.down = false;
@@ -1255,6 +1320,7 @@
       y: state.player.y,
       facing: state.player.facing,
       spawnedAt: serverSpawnStamp || 0,
+      crewId: crewOwnerId || serverPlayerId || localPeerId,
       level: state.player.level,
       xp: state.player.totalXp || 0,
       health: state.player.health,
@@ -1265,6 +1331,7 @@
       world: serializeServerWorld(Boolean(options.fullWorld)),
       raftCommands: consumeRemoteRaftMoves(),
       playerHits: consumePlayerHits(),
+      healAmount: consumeHealAmount(),
       worldCommands: consumeWorldCommands(),
       projectileCommands: consumeProjectileCommands()
     };
@@ -1369,6 +1436,12 @@
     return hits;
   }
 
+  function consumeHealAmount() {
+    const amount = pendingHealAmount;
+    pendingHealAmount = 0;
+    return amount;
+  }
+
   function queueWorldCommand(ownerId, command) {
     if (!ownerId || !command) return;
     pendingWorldCommands.push({ ownerId, ...command });
@@ -1419,6 +1492,19 @@
     }
   }
 
+  function notifyServerDeath() {
+    scoreboardRows = scoreboardRows.filter((row) => row?.id !== serverPlayerId && row?.id !== localPeerId);
+    renderScoreboard();
+    if (!serverPlayerId) return;
+    const payload = playerNetState(serverPlayerId);
+    fetch(`${SERVER_API_ROOT}/api/state`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      keepalive: true
+    }).catch(() => {});
+  }
+
   function applyServerSnapshot(data) {
     if (!data) return;
     if (data.id) serverPlayerId = data.id;
@@ -1429,7 +1515,7 @@
     const forceOwnTransform = Boolean(incomingSpawnStamp && incomingSpawnStamp !== serverSpawnStamp);
     applyOwnServerWorld(data.worlds?.[serverPlayerId], forceOwnTransform);
     applyServerPlayerState(ownServerPlayer);
-    remotePlayers = (data.players || []).filter((p) => p.id !== serverPlayerId);
+    setRemotePlayers((data.players || []).filter((p) => p.id !== serverPlayerId));
     applyRemoteWorlds(data.worlds || {}, serverPlayerId);
     serverAggressiveSharks = data.serverSharks || [];
     applyServerSharks(serverAggressiveSharks);
@@ -1467,6 +1553,7 @@
     if (resetView) {
       scoreboardRows = [local];
       remotePlayers = [];
+      remotePlayerVisuals.clear();
       serverAggressiveSharks = [];
       remoteWorlds.clear();
       serverPlayerId = null;
@@ -1691,7 +1778,7 @@
     const local = playerNetState(localPeerId);
     const peers = [...localPeers.values()].filter((p) => p.health > 0);
     scoreboardRows = [local, ...peers];
-    remotePlayers = peers;
+    setRemotePlayers(peers);
     applyRemoteWorlds(Object.fromEntries(peers.filter((peer) => peer.world).map((peer) => [peer.id, peer.world])), localPeerId);
     renderScoreboard();
   }
@@ -1812,6 +1899,16 @@
 
   function applyServerPlayerState(serverPlayer) {
     if (!serverPlayer || !state.player.alive) return;
+    crewOwnerId = serverPlayer.crewId || serverPlayerId;
+    const teleportAt = cleanCoord(serverPlayer.teleportAt, 0);
+    if (teleportAt && teleportAt !== serverTeleportStamp) {
+      serverTeleportStamp = teleportAt;
+      state.player.x = clamp(cleanCoord(serverPlayer.x, state.player.x), 80, WORLD - 80);
+      state.player.y = clamp(cleanCoord(serverPlayer.y, state.player.y), 80, WORLD - 80);
+      state.camera.x = state.player.x;
+      state.camera.y = state.player.y;
+      state.player.swimTime = 0;
+    }
     const spawnedAt = cleanCoord(serverPlayer.spawnedAt, 0);
     if (spawnedAt && spawnedAt !== serverSpawnStamp) {
       serverSpawnStamp = spawnedAt;
@@ -1830,6 +1927,7 @@
     if (state.player.health <= 0) {
       state.player.health = 0;
       state.player.alive = false;
+      notifyServerDeath();
       gameStarted = false;
       publishLocalPeer("leave");
       fallenNameEl.textContent = state.player.name || playerName;
@@ -1845,7 +1943,14 @@
 
   function renderScoreboard() {
     if (!scoreboardListEl) return;
-    const rows = [...scoreboardRows]
+    const unique = new Map();
+    for (const row of scoreboardRows) {
+      if (!row || row.health <= 0) continue;
+      const key = String(row.name || row.id || "Player").trim().toLowerCase();
+      const current = unique.get(key);
+      if (!current || (row.xp || 0) > (current.xp || 0)) unique.set(key, row);
+    }
+    const rows = [...unique.values()]
       .sort((a, b) => (b.xp || 0) - (a.xp || 0))
       .slice(0, 8);
     scoreboardListEl.innerHTML = "";
@@ -1879,6 +1984,7 @@
 
   function update(dt) {
     waveTime += dt;
+    updateRemotePlayerMotion(dt);
     if (toastTimer > 0) {
       toastTimer -= dt;
       if (toastTimer <= 0) toastEl.classList.remove("show");
@@ -2049,6 +2155,24 @@
         if (x > r.x && x < r.x + r.w && y > r.y && y < r.y + r.h) {
           return { local: false, ownerId, world, tile: rt };
         }
+      }
+    }
+    return null;
+  }
+
+  function crewWorldEntry() {
+    if (!crewOwnerId || crewOwnerId === serverPlayerId) return null;
+    const world = remoteWorlds.get(crewOwnerId);
+    return world ? { ownerId: crewOwnerId, world } : null;
+  }
+
+  function crewRaftAt(x, y) {
+    const entry = crewWorldEntry();
+    if (!entry) return null;
+    for (const tile of entry.world.raft || []) {
+      const rect = remoteRaftTileRect(entry.world, tile);
+      if (x > rect.x && x < rect.x + rect.w && y > rect.y && y < rect.y + rect.h) {
+        return { ...entry, tile };
       }
     }
     return null;
@@ -3185,8 +3309,13 @@
   function interact() {
     if (!gameStarted) return;
     if (!state.player.alive) return;
-    if (!spendStamina(2)) return;
     const p = state.player;
+    const nearbyPlayer = nearestRemotePlayer(p, 72);
+    if (nearbyPlayer && !isCrewMate(nearbyPlayer)) {
+      joinPlayerCrew(nearbyPlayer);
+      return;
+    }
+    if (!spendStamina(2)) return;
     for (const d of state.debris) {
       if (dist(p, d) < 84) {
         collectDebris(d);
@@ -3229,6 +3358,40 @@
       return;
     }
     toast("Nothing close enough to interact with.");
+  }
+
+  function nearestRemotePlayer(from, maxDistance = Infinity) {
+    let best = null;
+    let bestDistance = maxDistance;
+    for (const player of remotePlayers) {
+      if (!player || player.health <= 0) continue;
+      const gap = dist(from, player);
+      if (gap < bestDistance) {
+        best = player;
+        bestDistance = gap;
+      }
+    }
+    return best;
+  }
+
+  function isCrewMate(player) {
+    const ownCrew = crewOwnerId || serverPlayerId || localPeerId;
+    return Boolean(player && (player.crewId || player.id) === ownCrew);
+  }
+
+  async function joinPlayerCrew(player) {
+    if (!serverPlayerId) return toast("Connect to the multiplayer server before joining a crew.");
+    try {
+      const data = await serverPost("/api/crew/join", {
+        id: serverPlayerId,
+        clientId: localPeerId,
+        targetId: player.id
+      });
+      applyServerSnapshot(data);
+      toast(`Joined ${player.name || "player"}'s crew.`);
+    } catch {
+      toast("Could not join that crew. Try again nearby.");
+    }
   }
 
   function operateStructure(st) {
@@ -3404,7 +3567,23 @@
     const spot = buildPlacementPoint();
     const craftedNow = ensureBuildReady(buildChoice);
     if (!craftedNow) return;
+    const crewEntry = crewWorldEntry();
+    const standingOnCrewRaft = crewEntry && crewRaftAt(state.player.x, state.player.y);
     if (buildChoice === "raft") {
+      if (standingOnCrewRaft) {
+        const gx = Math.round((spot.x - crewEntry.world.raftOffset.x - TILE / 2) / TILE);
+        const gy = Math.round((spot.y - crewEntry.world.raftOffset.y - TILE / 2) / TILE);
+        if (crewEntry.world.raft.some((rt) => rt.gx === gx && rt.gy === gy)) return toast("That crew raft tile already exists.");
+        const adjacent = crewEntry.world.raft.some((rt) => Math.abs(rt.gx - gx) + Math.abs(rt.gy - gy) === 1);
+        if (!adjacent) return toast("New crew raft tiles must touch the shared raft.");
+        const newTile = tile(gx, gy, "deck");
+        crewEntry.world.raft.push(newTile);
+        queueWorldCommand(crewEntry.ownerId, { type: "addRaftTile", tile: newTile });
+        consumeBuild(buildChoice);
+        gainXp(6);
+        toast("Crew raft expanded.");
+        return;
+      }
       if (state.raft.length === 0) {
         if (isOnIsland(spot)) return toast("Start a new raft in open water.");
         state.raftOffset.x = spot.x - TILE / 2;
@@ -3432,6 +3611,26 @@
     if (!site) return toast("Place blocks fully on your raft or on island ground.");
     const angle = state.player.facing + buildAngle;
     const candidate = createStructure(buildChoice, spot.x, spot.y, angle, site.kind);
+    if (site.kind === "crewRaft") {
+      if (site.world.structures.some((structure) => placementFootprintsOverlap(candidate, structure))) return toast("That crew raft spot is occupied.");
+      candidate.base = "raft";
+      candidate.id = `${localPeerId}-crew-${Date.now().toString(36)}-${nextServerObjectId++}`;
+      candidate.remoteOwnerId = site.ownerId;
+      site.world.structures.push(candidate);
+      queueWorldCommand(site.ownerId, {
+        type: "addStructure",
+        structure: {
+          ...candidate,
+          remoteOwnerId: undefined,
+          hitbox: footprint(candidate.type),
+          storage: candidate.type === "chest" ? chestSlots(candidate) : null
+        }
+      });
+      consumeBuild(buildChoice);
+      gainXp(8);
+      toast(`${label(buildChoice)} added to the crew raft.`);
+      return;
+    }
     if (state.structures.some((s) => placementFootprintsOverlap(candidate, s))) return toast("That spot is occupied.");
     state.structures.push(candidate);
     bumpLocalWorldVersion();
@@ -3667,6 +3866,13 @@
       const fits = x > r.x + raftPadding && x < r.x + TILE - raftPadding && y > r.y + raftPadding && y < r.y + TILE - raftPadding;
       return fits ? { kind: "raft", tile: rt } : null;
     }
+    const crewTile = crewRaftAt(x, y);
+    if (crewTile) {
+      const rect = remoteRaftTileRect(crewTile.world, crewTile.tile);
+      const raftPadding = Math.max(6, radius * 0.45);
+      const fits = x > rect.x + raftPadding && x < rect.x + TILE - raftPadding && y > rect.y + raftPadding && y < rect.y + TILE - raftPadding;
+      return fits ? { kind: "crewRaft", ownerId: crewTile.ownerId, world: crewTile.world, tile: crewTile.tile } : null;
+    }
     const island = state.islands.find((item) => Math.hypot(x - item.x, y - item.y) <= item.r + 4 - radius * 0.15);
     if (island) return { kind: "island", island };
     return null;
@@ -3684,6 +3890,7 @@
     if (managedItemCount("bandage") <= 0) return toast("No bandages.");
     removePlayerItem("bandage", 1, HOTBAR_SWAP_SLOTS.includes(selected) ? { area: "hotbar", index: selected } : null);
     state.player.health = clamp(state.player.health + 35, 0, 100);
+    pendingHealAmount += 35;
     renderHotbar();
     toast("Bandage used.");
   }
@@ -3800,6 +4007,7 @@
     if (p.health <= 0) {
       p.health = 0;
       p.alive = false;
+      notifyServerDeath();
       gameStarted = false;
       publishLocalPeer("leave");
       fallenNameEl.textContent = p.name || playerName;
@@ -3878,6 +4086,9 @@
       return ready > 0 ? `Build: ${label(buildChoice)} (${ready}). Click to place, R rotate, N next.` : `Build: ${label(buildChoice)}. Click to craft/place if you have ${recipeText(buildChoice)}.`;
     }
     const p = state.player;
+    const nearbyPlayer = nearestRemotePlayer(p, 72);
+    if (nearbyPlayer && !isCrewMate(nearbyPlayer)) return `F: join ${nearbyPlayer.name || "player"}'s crew`;
+    if (nearbyPlayer && isCrewMate(nearbyPlayer)) return `${nearbyPlayer.name || "Player"} is in your crew`;
     const st = state.structures.find((s) => dist(s, p) < 56);
     if (st) return `F: use ${label(st.type)}`;
     const remoteSt = nearestRemoteStructure(p, 56);
@@ -4993,9 +5204,11 @@
     ctx.globalAlpha = 0.58;
     ctx.fillStyle = legal ? "#64fff0" : "#ff6b80";
     if (buildChoice === "raft") {
-      const gx = Math.round((spot.x - state.raftOffset.x - TILE / 2) / TILE);
-      const gy = Math.round((spot.y - state.raftOffset.y - TILE / 2) / TILE);
-      roundRect(state.raftOffset.x + gx * TILE + 2, state.raftOffset.y + gy * TILE + 2, TILE - 4, TILE - 4, 5);
+      const crewEntry = crewWorldEntry();
+      const origin = crewEntry && crewRaftAt(state.player.x, state.player.y) ? crewEntry.world.raftOffset : state.raftOffset;
+      const gx = Math.round((spot.x - origin.x - TILE / 2) / TILE);
+      const gy = Math.round((spot.y - origin.y - TILE / 2) / TILE);
+      roundRect(origin.x + gx * TILE + 2, origin.y + gy * TILE + 2, TILE - 4, TILE - 4, 5);
     } else {
       const f = footprint(buildChoice);
       ctx.save();
