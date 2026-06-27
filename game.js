@@ -32,9 +32,10 @@
   const WORLD = 9600;
   const STRUCTURE_RADIUS = 21;
   const TREE_COLLISION_RADIUS = 18;
+  const ORE_COLLISION_RADIUS = 22;
   const INITIAL_DEBRIS = 150;
   const DEBRIS_TARGET = 140;
-  const SERVER_SYNC_INTERVAL = 1;
+  const SERVER_SYNC_INTERVAL = 0.5;
   const SERVER_REQUEST_TIMEOUT = 25000;
   const SPAWN_CLEARANCE = 520;
   const SPAWN_POINTS = [
@@ -74,7 +75,7 @@
   const DEV_RESOURCE_AMOUNT = 9999;
   const FOOD_ITEMS = ["cookedFish", "cookedMeat", "rawFish", "tomato", "coconut"];
   const TIER_ORDER = ["wood", "scrap", "iron", "steel"];
-  const TOOL_BASES = ["axe", "spear", "hammer"];
+  const TOOL_BASES = ["axe", "spear", "hammer", "pickaxe"];
   const TOOL_TIERS = {
     wood: { name: "Wood", durability: 100, power: 1, color: "#d4bd82" },
     scrap: { name: "Scrap", durability: 200, power: 1.25, color: "#a8b5ba" },
@@ -96,13 +97,14 @@
 
   const recipes = {
     raft: { wood: 6, rope: 2 },
-    grill: { wood: 8, scrap: 4 },
-    waterMaker: { wood: 8, scrap: 6, glass: 2 },
+    grill: { wood: 8, scrap: 5 },
+    waterMaker: { wood: 8, scrap: 8, glass: 2 },
+    ironRefinery: { wood: 10, scrap: 12, glass: 2 },
     plantPot: { wood: 4, leaves: 4 },
     chest: { wood: 8, cloth: 2 },
     wall: { wood: 5, leaves: 2 },
     torch: { wood: 2, leaves: 2, cloth: 1 },
-    cannon: { wood: 10, scrap: 8, rope: 2 },
+    cannon: { wood: 10, scrap: 10, rope: 2, iron: 2 },
     bandage: { cloth: 2, leaves: 3 },
     flask: { glass: 1, rope: 1 },
     rod: { wood: 4, rope: 2 },
@@ -119,13 +121,20 @@
     scrapHammer: { wood: 5, scrap: 8, cloth: 2 },
     ironHammer: { wood: 6, scrap: 6, iron: 7, cloth: 2 },
     steelHammer: { wood: 7, iron: 5, steel: 7, cloth: 3 },
-    musket: { wood: 18, scrap: 26, rope: 6, cloth: 4, glass: 4 }
+    woodPickaxe: { wood: 6, rope: 2 },
+    scrapPickaxe: { wood: 5, scrap: 9, rope: 3 },
+    ironPickaxe: { wood: 5, scrap: 6, iron: 9, rope: 3 },
+    steelPickaxe: { wood: 6, iron: 6, steel: 9, rope: 4 },
+    musket: { wood: 18, scrap: 28, iron: 4, rope: 6, cloth: 4, glass: 4 }
   };
+
+  const RESOURCE_CRAFT_OUTPUTS = {};
 
   const blockHp = {
     deck: 120,
     grill: 143,
     waterMaker: 165,
+    ironRefinery: 210,
     plantPot: 90,
     chest: 180,
     wall: 255,
@@ -136,6 +145,7 @@
   const blockFootprints = {
     grill: { w: 34, h: 28 },
     waterMaker: { w: 34, h: 34 },
+    ironRefinery: { w: 44, h: 38 },
     plantPot: { w: 32, h: 24 },
     chest: { w: 36, h: 28 },
     wall: { w: 64, h: 28 },
@@ -150,7 +160,7 @@
     { id: "woodSpear", name: "Wood Spear", key: "4", qty: 1, swappable: true },
     { id: "woodHammer", name: "Wood Hammer", key: "5", qty: 1, swappable: true },
     { id: "bandage", name: "Bandage", key: "6", qty: 1, swappable: true },
-    { id: "empty", name: "-", key: "7", swappable: true },
+    { id: "woodPickaxe", name: "Wood Pickaxe", key: "7", qty: 1, swappable: true },
     { id: "empty", name: "-", key: "8", swappable: true },
     { id: "empty", name: "-", key: "9", swappable: true },
     { id: "empty", name: "-", key: "0", swappable: true }
@@ -184,6 +194,8 @@
   let remotePlayers = [];
   const remotePlayerVisuals = new Map();
   let serverAggressiveSharks = [];
+  let serverElephants = [];
+  let serverOreNodes = [];
   let serverProjectiles = [];
   let serverRetryTimer = 0;
   let serverRetryDelay = 1;
@@ -195,6 +207,7 @@
   let openChest = null;
   let dragSlotRef = null;
   let serverSyncInFlight = false;
+  let lastServerWorldVersionSent = -1;
   let nextServerObjectId = 1;
   let localSpawnApplied = false;
   let localWorldVersion = 0;
@@ -202,6 +215,10 @@
   let serverTeleportStamp = 0;
   let pendingRemoteRaftMoves = new Map();
   let pendingPlayerHits = [];
+  let pendingSharkHits = [];
+  let pendingElephantHits = [];
+  let pendingOreHits = [];
+  let lastServerGrantId = 0;
   let pendingHealAmount = 0;
   let pendingWorldCommands = [];
   let pendingProjectileCommands = [];
@@ -334,6 +351,7 @@
       structures: [],
       debris: [],
       islands: [],
+      oreNodes: [],
       animals: [],
       animalRespawns: [],
       projectiles: [],
@@ -361,7 +379,7 @@
       raftOffset: { x: player.x - TILE, y: player.y - TILE },
       sharks: createSharks(player),
       crocTimer: rnd(90, 170),
-      unlocks: { axe: "wood", spear: "wood", hammer: "wood" },
+      unlocks: { axe: "wood", spear: "wood", hammer: "wood", pickaxe: "wood" },
       messages: [],
       day: 1
     };
@@ -399,7 +417,7 @@
     setHotbarItem(3, slot("woodSpear", 1));
     setHotbarItem(4, slot("woodHammer", 1));
     setHotbarItem(5, slot("bandage", 1));
-    setHotbarItem(6, null);
+    setHotbarItem(6, slot("woodPickaxe", 1));
     setHotbarItem(7, slot("flask", 1));
     setHotbarItem(8, null);
     setHotbarItem(9, null);
@@ -445,18 +463,18 @@
       { x: 1200, y: 1100, r: 215, kind: "small" },
       { x: 3000, y: 950, r: 260, kind: "medium", wreck: true },
       { x: 5200, y: 1200, r: 285, kind: "medium" },
-      { x: 8200, y: 1050, r: 330, kind: "large", wreck: true },
+      { x: 8200, y: 1050, r: 330, kind: "large", wreck: true, elephants: true },
       { x: 1500, y: 3000, r: 300, kind: "medium" },
-      { x: 4000, y: 3300, r: 430, kind: "large", wreck: true },
+      { x: 4000, y: 3300, r: 430, kind: "large", wreck: true, elephants: true },
       { x: 6500, y: 3100, r: 245, kind: "small" },
       { x: 8700, y: 3500, r: 275, kind: "medium" },
       { x: 1150, y: 5500, r: 260, kind: "medium" },
       { x: 3300, y: 5900, r: 225, kind: "small" },
-      { x: 6000, y: 5600, r: 380, kind: "large", wreck: true },
+      { x: 6000, y: 5600, r: 380, kind: "large", wreck: true, elephants: true },
       { x: 8500, y: 5900, r: 230, kind: "small" },
       { x: 1700, y: 8250, r: 315, kind: "medium", wreck: true },
       { x: 4700, y: 8100, r: 260, kind: "medium" },
-      { x: 7800, y: 8350, r: 390, kind: "large" }
+      { x: 7800, y: 8350, r: 390, kind: "large", elephants: true }
     ];
     specs.forEach(addIsland);
   }
@@ -476,10 +494,13 @@
   }
 
   function addIsland(spec) {
+    const islandIndex = state.islands.length;
     const island = { ...spec, trees: [], bushes: [], loot: [], shipwreck: null };
+    const oreSpots = ironVeinPositions(island, islandIndex);
+    addLocalIronVeins(island, islandIndex, oreSpots);
     const treeCount = spec.kind === "large" ? 26 : spec.kind === "medium" ? 17 : 10;
     for (let i = 0; i < treeCount; i++) {
-      const p = pointOnIsland(island, 0.78);
+      const p = pointOnIslandAvoiding(island, 0.78, TREE_COLLISION_RADIUS, oreSpots);
       island.trees.push({ ...p, hp: 40, maxHp: 40, coconut: true, respawn: 0 });
     }
     for (let i = 0; i < treeCount + 4; i++) {
@@ -495,10 +516,60 @@
     for (let i = 0; i < crabCount; i++) state.animals.push(animal("crab", pointOnIsland(island, 0.85), island));
   }
 
+  function ironVeinPositions(island, islandIndex) {
+    const count = island.r >= 350 ? 3 : island.r >= 285 ? 2 : 1;
+    const positions = [];
+    for (let i = 0; i < count; i++) {
+      const angle = islandIndex * 1.37 + i * (TAU / count) + 0.7;
+      const radius = island.r * (0.34 + i * 0.08);
+      positions.push({
+        x: island.x + Math.cos(angle) * radius,
+        y: island.y + Math.sin(angle) * radius
+      });
+    }
+    return positions;
+  }
+
+  function addLocalIronVeins(island, islandIndex, positions = ironVeinPositions(island, islandIndex)) {
+    for (let i = 0; i < positions.length; i++) {
+      const p = positions[i];
+      state.oreNodes.push({
+        id: `local-iron-${islandIndex}-${i}`,
+        type: "iron",
+        islandIndex,
+        x: p.x,
+        y: p.y,
+        hp: 92,
+        maxHp: 92,
+        active: true,
+        respawn: 0,
+        local: true
+      });
+    }
+  }
+
   function pointOnIsland(island, scale) {
     const a = rnd(0, TAU);
     const r = Math.sqrt(Math.random()) * island.r * scale;
     return { x: island.x + Math.cos(a) * r, y: island.y + Math.sin(a) * r };
+  }
+
+  function pointOnIslandAvoiding(island, scale, radius, blocked = []) {
+    for (let i = 0; i < 80; i++) {
+      const p = pointOnIsland(island, scale);
+      if (blocked.every((spot) => Math.hypot(p.x - spot.x, p.y - spot.y) >= radius + ORE_COLLISION_RADIUS + 10)) return p;
+    }
+    for (const ring of [0.18, 0.32, 0.48, 0.64, 0.78]) {
+      for (let i = 0; i < 32; i++) {
+        const a = (i / 32) * TAU;
+        const p = {
+          x: island.x + Math.cos(a) * island.r * scale * ring,
+          y: island.y + Math.sin(a) * island.r * scale * ring
+        };
+        if (blocked.every((spot) => Math.hypot(p.x - spot.x, p.y - spot.y) >= radius + ORE_COLLISION_RADIUS + 10)) return p;
+      }
+    }
+    return { x: island.x, y: island.y };
   }
 
   function addShipwreck(island) {
@@ -521,11 +592,10 @@
 
   function shipwreckLootType() {
     const roll = Math.random();
-    if (roll < 0.46) return "scrap";
-    if (roll < 0.66) return "glass";
-    if (roll < 0.83) return "rope";
-    if (roll < 0.97) return "iron";
-    return "steel";
+    if (roll < 0.55) return "scrap";
+    if (roll < 0.78) return "glass";
+    if (roll < 0.94) return "rope";
+    return "cloth";
   }
 
   function animal(type, p, homeIsland = null) {
@@ -540,7 +610,7 @@
 
   function spawnDebris() {
     const types = ["wood", "leaves", "scrap", "cloth", "rope", "glass", "barrel"];
-    const type = Math.random() < 0.025 ? "steel" : types[Math.floor(Math.random() * types.length)];
+    const type = types[Math.floor(Math.random() * types.length)];
     state.debris.push({
       x: rnd(260, WORLD - 260),
       y: rnd(260, WORLD - 260),
@@ -648,6 +718,7 @@
     state.player.name = playerName;
     state.debris = [];
     state.islands = [];
+    state.oreNodes = [];
     state.animals = [];
     seedWorld();
     setSafeSpawn();
@@ -682,8 +753,15 @@
     localPeers.clear();
     remotePlayerVisuals.clear();
     serverAggressiveSharks = [];
+    serverElephants = [];
+    serverOreNodes = [];
     remoteWorlds.clear();
     pendingRemoteRaftMoves.clear();
+    pendingPlayerHits = [];
+    pendingSharkHits = [];
+    pendingElephantHits = [];
+    pendingOreHits = [];
+    lastServerGrantId = 0;
     pendingHealAmount = 0;
     selected = 0;
     keys.clear();
@@ -755,6 +833,7 @@
         raft: "RAFT",
         grill: "GRL",
         waterMaker: "H2O",
+        ironRefinery: "REF",
         plantPot: "POT",
         chest: "BOX",
         wall: "WAL",
@@ -823,7 +902,7 @@
       const durability = canonical === "oar" ? TOOL_TIERS.wood.durability * 2 : TOOL_TIERS.wood.durability;
       return { id: canonical, base: canonical, tier: "wood", label: names[canonical], durability, power: 1, color: TOOL_TIERS.wood.color, single: true };
     }
-    const match = /^(wood|scrap|iron|steel)(Axe|Spear|Hammer)$/.exec(canonical);
+    const match = /^(wood|scrap|iron|steel)(Axe|Spear|Hammer|Pickaxe)$/.exec(canonical);
     if (!match) return null;
     const [, tier, baseName] = match;
     const base = baseName.charAt(0).toLowerCase() + baseName.slice(1);
@@ -865,7 +944,7 @@
   function markToolUnlocked(id) {
     const spec = toolSpec(id);
     if (!spec || spec.single) return;
-    if (!state.unlocks) state.unlocks = { axe: "wood", spear: "wood", hammer: "wood" };
+    if (!state.unlocks) state.unlocks = { axe: "wood", spear: "wood", hammer: "wood", pickaxe: "wood" };
     const current = state.unlocks[spec.base] || "wood";
     if (tierIndex(spec.tier) > tierIndex(current)) state.unlocks[spec.base] = spec.tier;
   }
@@ -1110,7 +1189,7 @@
     setSlot(target, sourceItem);
     setSlot(source, targetItem);
     syncManagedCountsFromSlots();
-    if ((source.area === "chest" || target.area === "chest") && openChest?.remoteOwnerId) syncRemoteStructure(openChest);
+    if ((source.area === "chest" || target.area === "chest") && openChest) syncRemoteStructure(openChest);
     if (shouldRender) {
       renderHotbar();
       renderInventory();
@@ -1243,6 +1322,7 @@
     if (!canAfford(name)) return toast(`Need ${recipeText(name)}.`);
     if (!craft(name, name !== "bandage")) return;
     recipeBookEl.hidden = true;
+    if (RESOURCE_CRAFT_OUTPUTS[name]) return;
     if (isBuildRecipe(name)) {
       selectBuildItem(name);
       return toast(`${label(name)} crafted. Click to place it.`);
@@ -1275,7 +1355,7 @@
   }
 
   function isCraftOnlyRecipe(name) {
-    return name === "bandage" || isHotbarCraftRecipe(name);
+    return name === "bandage" || Boolean(RESOURCE_CRAFT_OUTPUTS[name]) || isHotbarCraftRecipe(name);
   }
 
   function isBuildRecipe(name) {
@@ -1328,9 +1408,13 @@
       onIsland: Boolean(isOnIsland(state.player)),
       onRaft: Boolean(isOnRaft(state.player)),
       selectedItem: buildMode ? buildChoice : hotbar[selected]?.id || "empty",
-      world: serializeServerWorld(Boolean(options.fullWorld)),
+      world: options.includeWorld === false ? undefined : serializeServerWorld(Boolean(options.fullWorld)),
       raftCommands: consumeRemoteRaftMoves(),
       playerHits: consumePlayerHits(),
+      sharkHits: consumeSharkHits(),
+      elephantHits: consumeElephantHits(),
+      oreHits: consumeOreHits(),
+      grantAck: lastServerGrantId,
       healAmount: consumeHealAmount(),
       worldCommands: consumeWorldCommands(),
       projectileCommands: consumeProjectileCommands()
@@ -1352,6 +1436,14 @@
         hp: st.hp,
         maxHp: st.maxHp,
         hitbox: footprint(st.type),
+        timer: st.timer || 0,
+        maxTimer: st.maxTimer || 0,
+        ready: Boolean(st.ready),
+        hasGlass: Boolean(st.hasGlass),
+        planted: Boolean(st.planted),
+        cooking: st.cooking || null,
+        aimOffset: st.aimOffset || 0,
+        cooldown: st.cooldown || 0,
         storage: st.type === "chest" ? chestSlots(st) : null
       }))
     };
@@ -1433,6 +1525,45 @@
   function consumePlayerHits() {
     const hits = pendingPlayerHits.slice(0, 24);
     pendingPlayerHits = [];
+    return hits;
+  }
+
+  function queueSharkHit(shark, damage) {
+    if (!shark?.serverId || !Number.isFinite(damage) || damage <= 0) return;
+    pendingSharkHits.push({
+      sharkId: shark.serverId,
+      damage: clamp(Math.round(damage), 1, 120)
+    });
+    if (pendingSharkHits.length > 24) pendingSharkHits = pendingSharkHits.slice(-24);
+  }
+
+  function consumeSharkHits() {
+    const hits = pendingSharkHits.slice(0, 24);
+    pendingSharkHits = [];
+    return hits;
+  }
+
+  function queueElephantHit(elephant, damage) {
+    if (!elephant?.id || !Number.isFinite(damage) || damage <= 0) return;
+    pendingElephantHits.push({ elephantId: elephant.id, damage: clamp(Math.round(damage), 1, 160) });
+    if (pendingElephantHits.length > 24) pendingElephantHits = pendingElephantHits.slice(-24);
+  }
+
+  function consumeElephantHits() {
+    const hits = pendingElephantHits.slice(0, 24);
+    pendingElephantHits = [];
+    return hits;
+  }
+
+  function queueOreHit(node, damage, tier) {
+    if (!node?.id || !Number.isFinite(damage) || damage <= 0) return;
+    pendingOreHits.push({ nodeId: node.id, damage: clamp(Math.round(damage), 1, 80), tier });
+    if (pendingOreHits.length > 24) pendingOreHits = pendingOreHits.slice(-24);
+  }
+
+  function consumeOreHits() {
+    const hits = pendingOreHits.slice(0, 24);
+    pendingOreHits = [];
     return hits;
   }
 
@@ -1519,6 +1650,9 @@
     applyRemoteWorlds(data.worlds || {}, serverPlayerId);
     serverAggressiveSharks = data.serverSharks || [];
     applyServerSharks(serverAggressiveSharks);
+    applyServerElephants(data.serverElephants || []);
+    serverOreNodes = (data.serverOreNodes || []).map((node) => ({ ...node }));
+    applyServerGrants(data.grants || []);
     serverProjectiles = data.serverProjectiles || [];
     scoreboardRows = data.scoreboard || [playerNetState(serverPlayerId)];
     renderScoreboard();
@@ -1555,14 +1689,18 @@
       remotePlayers = [];
       remotePlayerVisuals.clear();
       serverAggressiveSharks = [];
+      serverElephants = [];
+      serverOreNodes = [];
       remoteWorlds.clear();
       serverPlayerId = null;
+      lastServerWorldVersionSent = -1;
       renderScoreboard();
     }
     usingLocalMultiplayer = false;
     try {
       const data = await serverPost("/api/join", local);
       applyServerSnapshot(data);
+      lastServerWorldVersionSent = localWorldVersion;
       markServerSuccess();
     } catch {
       if (!quiet && !serverEverConnected) toast("Server unavailable. Using local multiplayer while retrying.");
@@ -1596,7 +1734,10 @@
     if (serverSyncInFlight) return;
     serverSyncInFlight = true;
     try {
-      const data = await serverPost("/api/state", playerNetState(serverPlayerId));
+      const submittedWorldVersion = localWorldVersion;
+      const includeWorld = submittedWorldVersion !== lastServerWorldVersionSent;
+      const data = await serverPost("/api/state", playerNetState(serverPlayerId, { includeWorld }));
+      if (includeWorld) lastServerWorldVersionSent = submittedWorldVersion;
       applyServerSnapshot(data);
       markServerSuccess();
     } catch {
@@ -1882,10 +2023,11 @@
       shark.serverX = cleanCoord(serverShark.x, shark.x);
       shark.serverY = cleanCoord(serverShark.y, shark.y);
       shark.serverFacing = cleanCoord(serverShark.facing, shark.wander);
-      shark.aggressive = true;
-      shark.aggro = 99;
+      shark.maxHp = clamp(cleanCoord(serverShark.maxHp, SHARK_HP), 1, SHARK_HP);
+      shark.hp = clamp(cleanCoord(serverShark.hp, shark.hp), 0, shark.maxHp);
+      shark.aggressive = shark.hp > 0;
+      shark.aggro = shark.hp > 0 ? 99 : 0;
       shark.flee = 0;
-      shark.hp = SHARK_HP;
     }
     for (const shark of state.sharks) {
       if (shark.serverControlled && !claimed.has(shark)) {
@@ -1894,6 +2036,45 @@
         shark.serverTargetId = null;
       }
       if ((sharks || []).length && !claimed.has(shark)) shark.aggressive = false;
+    }
+  }
+
+  function applyServerElephants(elephants) {
+    const previous = new Map(serverElephants.map((elephant) => [elephant.id, elephant]));
+    serverElephants = (elephants || []).map((incoming) => {
+      const old = previous.get(incoming.id);
+      const respawned = old && old.hp <= 0 && incoming.hp > 0;
+      return {
+        ...incoming,
+        x: respawned ? incoming.x : old?.x ?? incoming.x,
+        y: respawned ? incoming.y : old?.y ?? incoming.y,
+        facing: respawned ? incoming.facing : old?.facing ?? incoming.facing,
+        targetX: cleanCoord(incoming.x, old?.x || 0),
+        targetY: cleanCoord(incoming.y, old?.y || 0),
+        targetFacing: cleanCoord(incoming.facing, old?.facing || 0),
+        hit: old?.hit || 0
+      };
+    });
+  }
+
+  function applyServerGrants(grants) {
+    for (const grant of grants || []) {
+      const id = Math.floor(cleanCoord(grant.id, 0));
+      if (!id || id <= lastServerGrantId) continue;
+      lastServerGrantId = id;
+      addRes(String(grant.type || ""), Math.max(0, Math.floor(cleanCoord(grant.qty, 0))));
+      toast(grant.message || `Collected ${grant.qty} ${label(grant.type).toLowerCase()}.`);
+    }
+  }
+
+  function updateServerEntityMotion(dt) {
+    const ease = 1 - Math.exp(-dt * 7);
+    const turnEase = 1 - Math.exp(-dt * 9);
+    for (const elephant of serverElephants) {
+      elephant.x += (elephant.targetX - elephant.x) * ease;
+      elephant.y += (elephant.targetY - elephant.y) * ease;
+      elephant.facing += shortAngle(elephant.targetFacing - elephant.facing) * turnEase;
+      elephant.hit = Math.max(0, (elephant.hit || 0) - dt);
     }
   }
 
@@ -1923,7 +2104,7 @@
     const serverHealth = clamp(cleanCoord(serverPlayer.health, state.player.health), 0, 100);
     if (serverHealth >= state.player.health) return;
     state.player.health = serverHealth;
-    toast("You took server-side damage.");
+    burst(state.player.x, state.player.y, "#ff8f75", 8);
     if (state.player.health <= 0) {
       state.player.health = 0;
       state.player.alive = false;
@@ -1985,6 +2166,7 @@
   function update(dt) {
     waveTime += dt;
     updateRemotePlayerMotion(dt);
+    updateServerEntityMotion(dt);
     if (toastTimer > 0) {
       toastTimer -= dt;
       if (toastTimer <= 0) toastEl.classList.remove("show");
@@ -2120,8 +2302,26 @@
     return Boolean(raftAt(p.x, p.y) || remoteRaftAt(p.x, p.y));
   }
 
+  function landAreaAt(p, margin = 0) {
+    for (const island of state.islands) {
+      const islandRadius = island.r * ISLAND_WALK_SCALE;
+      if (Math.hypot(p.x - island.x, p.y - island.y) <= islandRadius + margin) {
+        return { island, x: island.x, y: island.y, r: islandRadius };
+      }
+      if (island.shipwreck && Math.hypot(p.x - island.shipwreck.x, p.y - island.shipwreck.y) <= SHIPWRECK_CLEAR_RADIUS + margin) {
+        return {
+          island,
+          x: island.shipwreck.x,
+          y: island.shipwreck.y,
+          r: SHIPWRECK_CLEAR_RADIUS
+        };
+      }
+    }
+    return null;
+  }
+
   function isOnIsland(p) {
-    return state.islands.some((island) => Math.hypot(p.x - island.x, p.y - island.y) <= island.r * ISLAND_WALK_SCALE);
+    return Boolean(landAreaAt(p));
   }
 
   function raftTileRect(rt) {
@@ -2237,7 +2437,7 @@
         { x: r.x + dx + 6, y: r.y + r.h + dy - 6 },
         { x: r.x + r.w + dx - 6, y: r.y + r.h + dy - 6 }
       ];
-      if (corners.some((pt) => state.islands.some((island) => Math.hypot(pt.x - island.x, pt.y - island.y) < island.r + 8))) return true;
+      if (corners.some((pt) => landAreaAt(pt, 8))) return true;
     }
     return false;
   }
@@ -2251,7 +2451,7 @@
         { x: r.x + dx + 6, y: r.y + r.h + dy - 6 },
         { x: r.x + r.w + dx - 6, y: r.y + r.h + dy - 6 }
       ];
-      if (corners.some((pt) => state.islands.some((island) => Math.hypot(pt.x - island.x, pt.y - island.y) < island.r + 8))) return true;
+      if (corners.some((pt) => landAreaAt(pt, 8))) return true;
     }
     return false;
   }
@@ -2260,11 +2460,11 @@
     for (const d of state.debris) {
       if (!d.stopped) {
         const next = { x: d.x + d.vx * dt, y: d.y + d.vy * dt };
-        const island = shoreCollision(next);
-        if (island) {
-          const a = angleTo(island, next);
-          d.x = island.x + Math.cos(a) * (island.r + 18);
-          d.y = island.y + Math.sin(a) * (island.r + 18);
+        const shore = shoreCollision(next);
+        if (shore) {
+          const a = angleTo(shore, next);
+          d.x = shore.x + Math.cos(a) * (shore.r + 18);
+          d.y = shore.y + Math.sin(a) * (shore.r + 18);
           d.vx = 0;
           d.vy = 0;
           d.stopped = true;
@@ -2289,19 +2489,18 @@
   }
 
   function shoreCollision(p) {
-    return state.islands.find((island) => Math.hypot(p.x - island.x, p.y - island.y) < island.r + 18);
+    return landAreaAt(p, 18);
   }
 
   function collectDebris(d) {
     d.dead = true;
     if (d.type === "barrel") {
-      const haul = ["wood", "wood", "leaves", "scrap", "scrap", "cloth", "rope", "glass", "iron"];
+      const haul = ["wood", "wood", "leaves", "scrap", "scrap", "cloth", "rope", "glass"];
       const found = {};
       for (let i = 0; i < 4; i++) {
         const item = haul[Math.floor(Math.random() * haul.length)];
         found[item] = (found[item] || 0) + 1;
       }
-      if (Math.random() < 0.08) found.steel = (found.steel || 0) + 1;
       for (const [item, qty] of Object.entries(found)) addRes(item, qty);
       gainXp(5);
       toast(`Barrel: ${Object.entries(found).map(([item, qty]) => `${qty} ${label(item).toLowerCase()}`).join(", ")}.`);
@@ -2462,6 +2661,7 @@
       s.flee = Math.max(0, s.flee - dt);
       s.aggro = Math.max(0, s.aggro - dt);
       s.finBob += dt * 2.4;
+      if (s.hp <= 0) continue;
       if (Math.random() < dt * 0.25) s.wander += rnd(-0.65, 0.65);
       const aggro = s.aggressive || s.aggro > 0;
       const target = aggro ? sharkTarget(s, land) : null;
@@ -2475,7 +2675,7 @@
       s.wander += shortAngle(a - s.wander) * clamp(dt * (s.serverControlled ? 4.8 : 3.4), 0, 1);
       a = s.wander;
       const targetDistance = target ? dist(s, target) : Infinity;
-      let spd = s.serverControlled ? 112 : s.flee > 0 ? 125 : aggro ? 105 : 42;
+      let spd = s.serverControlled ? 78 : s.flee > 0 ? 95 : aggro ? 78 : 30;
       if (targetDistance < 46 && s.bite > 0) spd *= 0.35;
       s.x += Math.cos(a) * spd * dt;
       s.y += Math.sin(a) * spd * dt;
@@ -2496,7 +2696,7 @@
       }
       keepSharkOffLand(s);
       resolveWallCollision(s, 28);
-      if (aggro && !land && !isOnRaft(p) && dist(s, p) < 46 && s.bite <= 0) {
+      if (!s.serverControlled && aggro && !land && !isOnRaft(p) && dist(s, p) < 46 && s.bite <= 0) {
         hurt(SHARK_BITE_DAMAGE, "The shark bit you.");
         s.bite = 1.3;
       }
@@ -2524,7 +2724,7 @@
   }
 
   function islandAt(p) {
-    return state.islands.find((island) => Math.hypot(p.x - island.x, p.y - island.y) <= island.r * ISLAND_WALK_SCALE);
+    return landAreaAt(p)?.island || null;
   }
 
   function sharkWaterPoint(island, s) {
@@ -2673,6 +2873,14 @@
           toast("Tomatoes are ready to harvest.");
         }
       }
+      if (st.type === "ironRefinery" && st.timer > 0) {
+        st.timer -= dt;
+        if (st.timer <= 0) {
+          st.timer = 0;
+          st.ready = true;
+          toast("Iron refinery has steel ready.");
+        }
+      }
       if (st.type === "cannon") st.cooldown = Math.max(0, (st.cooldown || 0) - dt);
     }
   }
@@ -2761,7 +2969,7 @@
       vy: Math.sin(angle) * 560,
       age: 0,
       life: 1.05,
-      damage: 21,
+      damage: 32,
       radius: 8
     };
     state.projectiles.push(shot);
@@ -2770,6 +2978,11 @@
   }
 
   function damageDirectShot(shot) {
+    for (const elephant of serverElephants) {
+      if (elephant.hp <= 0 || dist(elephant, shot) > 34) continue;
+      damageServerElephant(elephant, shot.damage);
+      return true;
+    }
     for (const a of state.animals) {
       if (a.dead || a.submerged || dist(a, shot) > 24) continue;
       a.hp -= shot.damage;
@@ -2779,24 +2992,18 @@
       return true;
     }
     for (const s of state.sharks) {
-      if (dist(s, shot) > 34) continue;
-      s.hp -= shot.damage;
+      if (s.hp <= 0 || dist(s, shot) > 34) continue;
       s.aggro = 18;
       s.flee = 0.5;
-      if (s.hp <= 0) {
-        addRes("sharkMeat", 3);
-        gainXp(45);
-        respawnShark(s);
-        toast("Musket sank a shark. Shark meat acquired.");
-      }
+      damageShark(s, shot.damage, "Musket sank a shark. Shark meat acquired.");
       return true;
     }
     for (const st of [...state.structures]) {
       if (dist(st, shot) > footprintRadius(st.type) + 7) continue;
       st.hp -= Math.max(6, Math.round(shot.damage * 0.45));
+      bumpLocalWorldVersion();
       if (st.hp <= 0) {
-        state.structures = state.structures.filter((item) => item !== st);
-        if (activeCannon === st) activeCannon = null;
+        destroyLocalPlacedItem(st);
       }
       return true;
     }
@@ -2814,6 +3021,10 @@
   function explodeCannonball(shot) {
     burst(shot.x, shot.y, "#31333a", 18);
     burst(shot.x, shot.y, "#ffb45d", 16);
+    for (const elephant of serverElephants) {
+      if (elephant.hp <= 0 || dist(elephant, shot) > shot.radius + 28) continue;
+      damageServerElephant(elephant, shot.damage);
+    }
     for (const a of state.animals) {
       if (a.dead || dist(a, shot) > shot.radius) continue;
       a.hp -= shot.damage;
@@ -2821,23 +3032,17 @@
       if (a.hp <= 0) killAnimal(a);
     }
     for (const s of state.sharks) {
-      if (dist(s, shot) > shot.radius + 12) continue;
-      s.hp -= shot.damage;
+      if (s.hp <= 0 || dist(s, shot) > shot.radius + 12) continue;
       s.aggro = 16;
       s.flee = 0.8;
-      if (s.hp <= 0) {
-        addRes("sharkMeat", 3);
-        gainXp(45);
-        respawnShark(s);
-        toast("Cannon sank a shark. Shark meat acquired.");
-      }
+      damageShark(s, shot.damage, "Cannon sank a shark. Shark meat acquired.");
     }
     for (const st of [...state.structures]) {
       if (dist(st, shot) > shot.radius + footprintRadius(st.type)) continue;
       st.hp -= shot.damage;
+      bumpLocalWorldVersion();
       if (st.hp <= 0) {
-        state.structures = state.structures.filter((item) => item !== st);
-        if (activeCannon === st) activeCannon = null;
+        destroyLocalPlacedItem(st);
       }
     }
     for (const rt of [...state.raft]) {
@@ -2863,7 +3068,7 @@
         const damage = Math.max(4, Math.round(shot.damage * 0.3));
         st.hp -= damage;
         queueWorldCommand(ownerId, { type: "damageStructure", structureId: st.id, damage });
-        if (st.hp <= 0) removeRemoteStructureLocal(world, st);
+        if (st.hp <= 0) destroyRemotePlacedItem(world, st);
         return true;
       }
     }
@@ -2876,7 +3081,7 @@
         if (dist(st, shot) > shot.radius + footprintRadius(st.type)) continue;
         st.hp -= shot.damage;
         queueWorldCommand(ownerId, { type: "damageStructure", structureId: st.id, damage: shot.damage });
-        if (st.hp <= 0) removeRemoteStructureLocal(world, st);
+        if (st.hp <= 0) destroyRemotePlacedItem(world, st);
       }
       for (const rt of [...(world.raft || [])]) {
         const c = remoteTileCenter(world, rt);
@@ -2890,6 +3095,14 @@
   }
 
   function updateWorldRespawns(dt) {
+    for (const node of state.oreNodes || []) {
+      if (node.active || !node.respawn) continue;
+      node.respawn = Math.max(0, node.respawn - dt);
+      if (node.respawn <= 0) {
+        node.active = true;
+        node.hp = node.maxHp || 92;
+      }
+    }
     for (const island of state.islands) {
       for (const tree of island.trees) {
         if (!tree.dead) continue;
@@ -2949,10 +3162,11 @@
       const occupiedByStructure = state.structures.some((st) => dist(st, p) < footprintRadius(st.type) + radius);
       const occupiedByTree = island.trees.some((tree) => !tree.dead && dist(tree, p) < radius + 18);
       const occupiedByAnimal = state.animals.some((a) => !a.dead && dist(a, p) < radius + 18);
+      const occupiedByOre = activeOreNodes().some((node) => dist(node, p) < radius + ORE_COLLISION_RADIUS + 10);
       const inWreck = island.shipwreck && dist(island.shipwreck, p) < SHIPWRECK_CLEAR_RADIUS;
-      if (!occupiedByStructure && !occupiedByTree && !occupiedByAnimal && !inWreck) return p;
+      if (!occupiedByStructure && !occupiedByTree && !occupiedByAnimal && !occupiedByOre && !inWreck) return p;
     }
-    return pointOnIsland(island, scale);
+    return pointOnIslandAvoiding(island, scale, radius, activeOreNodes());
   }
 
   function updateParticles(dt) {
@@ -3010,7 +3224,7 @@
     if (buildMode) return placeBuild();
     if (id === "rod") return useRod();
     const spec = toolSpec(id);
-    if (spec && ["axe", "spear", "hammer"].includes(spec.base)) return swing(id);
+    if (spec && ["axe", "spear", "hammer", "pickaxe"].includes(spec.base)) return swing(id);
     if (id === "musket") return fireMusket();
     if (id === "bandage") return useBandage();
     if (FOOD_ITEMS.includes(id)) {
@@ -3039,7 +3253,7 @@
     const p = state.player;
     if (p.attackCd > 0) return;
     const spec = toolSpec(kind);
-    if (!spec || !["axe", "spear", "hammer"].includes(spec.base)) return;
+    if (!spec || !["axe", "spear", "hammer", "pickaxe"].includes(spec.base)) return;
     const baseKind = spec.base;
     const tierStep = tierIndex(spec.tier);
     if (!spendStamina(baseKind === "spear" ? 9 + tierStep * 0.5 : 8 + tierStep * 0.5)) return;
@@ -3047,10 +3261,19 @@
     p.attackCd = baseKind === "spear" ? clamp(0.48 - tierStep * 0.04, 0.32, 0.48) : clamp(0.62 - tierStep * 0.05, 0.42, 0.62);
     toolAnim = { kind: baseKind, t: p.attackCd, duration: p.attackCd };
     const reach = (baseKind === "spear" ? 82 : 58) + tierStep * (baseKind === "spear" ? 5 : 3);
-    const baseDamage = baseKind === "spear" ? 28 : baseKind === "axe" ? 20 : 12;
+    const baseDamage = baseKind === "spear" ? 28 : baseKind === "axe" ? 20 : baseKind === "pickaxe" ? 16 : 12;
     const damage = Math.round(baseDamage * spec.power + p.strength * 3);
     const targetAngle = angleTo(p, mouseWorld());
     burst(p.x + Math.cos(targetAngle) * 34, p.y + Math.sin(targetAngle) * 34, baseKind === "hammer" ? "#b8d4de" : "#fff3c9", 6);
+
+    if (baseKind === "pickaxe" && mineServerOre(reach + 4, targetAngle, spec)) return;
+
+    const elephant = nearestServerElephantInArc(p, reach + 18, targetAngle);
+    if (elephant) {
+      damageServerElephant(elephant, damage);
+      gainXp(2);
+      return;
+    }
 
     for (const a of state.animals) {
       if (dist(p, a) < reach && Math.abs(shortAngle(targetAngle - angleTo(p, a))) < 0.9) {
@@ -3063,22 +3286,74 @@
     }
     const shark = nearestShark(p, reach + 8);
     if (shark) {
-      shark.hp -= damage;
       shark.flee = 2.2;
       shark.aggro = 14;
-      toast("The shark backs off.");
-      if (shark.hp <= 0) {
-        addRes("sharkMeat", 3);
-        gainXp(45);
-        respawnShark(shark);
-        toast("Shark defeated. Shark meat acquired.");
-      }
+      if (!damageShark(shark, damage, "Shark defeated. Shark meat acquired.")) toast("The shark backs off.");
       return;
     }
     if (damageRemotePlayer(reach, targetAngle, damage)) return;
     if (baseKind === "axe" && damagePlacedItem(reach, targetAngle, Math.round(damage * 0.42))) return;
     if (baseKind === "axe") chopTree(reach, targetAngle, damage);
     if (baseKind === "hammer") repairTile(reach, spec.power);
+  }
+
+  function mineServerOre(reach, targetAngle, spec) {
+    let best = null;
+    let bestD = Infinity;
+    const localFallback = serverOreNodes.length === 0;
+    for (const node of activeOreNodes()) {
+      if (!node.active || node.hp <= 0) continue;
+      const d = dist(state.player, node);
+      if (d < reach + 20 && Math.abs(shortAngle(targetAngle - angleTo(state.player, node))) < 0.9 && d < bestD) {
+        best = node;
+        bestD = d;
+      }
+    }
+    if (!best) return false;
+    const damage = Math.round(18 * spec.power);
+    best.hp = Math.max(0, best.hp - damage);
+    if (localFallback) {
+      if (best.hp <= 0) {
+        best.active = false;
+        best.respawn = 420;
+        addRes("iron", 2);
+        gainXp(5);
+        toast("Mined 2 iron ore.");
+      }
+    } else {
+      queueOreHit(best, damage, spec.tier);
+    }
+    burst(best.x, best.y, best.type === "iron" ? "#c9d1d4" : "#d98955", 9);
+    if (best.hp > 0) toast(`Mining ${label(best.type)}.`);
+    return true;
+  }
+
+  function activeOreNodes() {
+    return serverOreNodes.length ? serverOreNodes : state.oreNodes || [];
+  }
+
+  function nearestServerElephantInArc(from, reach, targetAngle) {
+    let best = null;
+    let bestD = Infinity;
+    for (const elephant of serverElephants) {
+      if (!elephant || elephant.hp <= 0) continue;
+      const d = dist(from, elephant);
+      if (d < reach + 30 && Math.abs(shortAngle(targetAngle - angleTo(from, elephant))) < 0.95 && d < bestD) {
+        best = elephant;
+        bestD = d;
+      }
+    }
+    return best;
+  }
+
+  function damageServerElephant(elephant, damage) {
+    if (!elephant || elephant.hp <= 0) return false;
+    elephant.hp = Math.max(0, elephant.hp - damage);
+    elephant.hit = 0.25;
+    queueElephantHit(elephant, damage);
+    burst(elephant.x, elephant.y, "#ffb0a1", 10);
+    toast(elephant.hp > 0 ? "The elephant is enraged." : "Elephant defeated.");
+    return true;
   }
 
   function damageRemotePlayer(reach, targetAngle, damage) {
@@ -3115,10 +3390,10 @@
     }
     if (best) {
       best.hp -= damage;
+      bumpLocalWorldVersion();
       burst(best.x, best.y, "#ffb08a", 8);
       if (best.hp <= 0) {
-        state.structures = state.structures.filter((st) => st !== best);
-        toast(`${label(best.type)} chopped down.`);
+        destroyLocalPlacedItem(best);
       } else {
         toast(`${label(best.type)} damaged.`);
       }
@@ -3153,6 +3428,30 @@
   function removeRemoteStructureLocal(world, st) {
     world.structures = (world.structures || []).filter((item) => item !== st);
     if (activeCannon === st) activeCannon = null;
+    if (openChest === st) closeInventory();
+  }
+
+  function placedItemWoodSalvage(st) {
+    return st?.type === "torch" || st?.type === "plantPot" ? 1 : 2;
+  }
+
+  function rewardPlacedItemSalvage(st) {
+    const wood = placedItemWoodSalvage(st);
+    addRes("wood", wood);
+    toast(`${label(st.type)} broke. Recovered ${wood} wood.`);
+  }
+
+  function destroyLocalPlacedItem(st) {
+    state.structures = state.structures.filter((item) => item !== st);
+    if (activeCannon === st) activeCannon = null;
+    if (openChest === st) closeInventory();
+    bumpLocalWorldVersion();
+    rewardPlacedItemSalvage(st);
+  }
+
+  function destroyRemotePlacedItem(world, st) {
+    removeRemoteStructureLocal(world, st);
+    rewardPlacedItemSalvage(st);
   }
 
   function removeRemoteRaftTileLocal(world, rt) {
@@ -3191,8 +3490,8 @@
       st.hp -= damage;
       queueWorldCommand(best.ownerId, { type: "damageStructure", structureId: st.id, damage });
       burst(st.x, st.y, "#ffb08a", 8);
-      if (st.hp <= 0) removeRemoteStructureLocal(best.world, st);
-      toast(`${label(st.type)} damaged.`);
+      if (st.hp <= 0) destroyRemotePlacedItem(best.world, st);
+      else toast(`${label(st.type)} damaged.`);
     } else {
       const rt = best.target;
       rt.hp -= damage;
@@ -3213,6 +3512,7 @@
     let best = null;
     let bestD = maxDist;
     for (const shark of state.sharks) {
+      if (shark.hp <= 0) continue;
       const d = dist(p, shark);
       if (d < bestD) {
         best = shark;
@@ -3220,6 +3520,25 @@
       }
     }
     return best;
+  }
+
+  function damageShark(shark, damage, defeatMessage) {
+    if (!shark || shark.hp <= 0 || !Number.isFinite(damage) || damage <= 0) return false;
+    shark.hp = Math.max(0, shark.hp - damage);
+    if (shark.serverControlled) queueSharkHit(shark, damage);
+    if (shark.hp > 0) return false;
+    addRes("sharkMeat", 3);
+    gainXp(45);
+    if (shark.serverControlled) {
+      shark.hp = 0;
+      shark.aggressive = false;
+      shark.aggro = 0;
+      shark.serverTargetId = null;
+    } else {
+      respawnShark(shark);
+    }
+    toast(defeatMessage);
+    return true;
   }
 
   function respawnShark(shark) {
@@ -3456,6 +3775,28 @@
       }
       return toast("Need an empty water flask.");
     }
+    if (st.type === "ironRefinery") {
+      if (st.ready) {
+        st.ready = false;
+        st.cooking = null;
+        addRes("steel", 1);
+        gainXp(7);
+        syncRemoteStructure(st);
+        return toast("Steel ingot collected.");
+      }
+      if (st.timer <= 0 && state.resources.iron >= 2) {
+        state.resources.iron -= 2;
+        st.cooking = "iron";
+        st.timer = 90;
+        st.maxTimer = 90;
+        st.ready = false;
+        renderHotbar();
+        syncRemoteStructure(st);
+        return toast("Iron refinery started making steel.");
+      }
+      if (st.timer > 0) return toast("Steel is still refining.");
+      return toast("Need 2 mined iron ore to make steel.");
+    }
     if (st.type === "plantPot") {
       if (st.ready) {
         st.ready = false;
@@ -3498,8 +3839,12 @@
   }
 
   function syncRemoteStructure(st) {
-    if (!st?.remoteOwnerId || !st.id) return;
-    queueWorldCommand(st.remoteOwnerId, { type: "patchStructure", structureId: st.id, patch: structureServerPatch(st) });
+    if (!st) return;
+    const ownerId = st.remoteOwnerId || serverPlayerId;
+    const structureId = st.id || serverObjectId("st", st);
+    if (!st.remoteOwnerId) bumpLocalWorldVersion();
+    if (!ownerId || !structureId) return;
+    queueWorldCommand(ownerId, { type: "patchStructure", structureId, patch: structureServerPatch(st) });
   }
 
   function craft(name, holdAfterCraft = false) {
@@ -3528,7 +3873,10 @@
       }
       for (const [res, qty] of Object.entries(recipe)) state.resources[res] -= qty;
     }
-    if (name === "bandage") {
+    if (RESOURCE_CRAFT_OUTPUTS[name]) {
+      addRes(name, RESOURCE_CRAFT_OUTPUTS[name]);
+      toast(`${RESOURCE_CRAFT_OUTPUTS[name]} ${label(name).toLowerCase()} crafted.`);
+    } else if (name === "bandage") {
       if (!addPlayerItem("bandage", 1)) return toast("Backpack is full.");
       toast("Bandage crafted.");
     } else if (isHotbarCraftRecipe(name)) {
@@ -3772,6 +4120,21 @@
     }
   }
 
+  function resolveOreCollision(entity, radius) {
+    for (const node of activeOreNodes()) {
+      if (!node.active || node.hp <= 0) continue;
+      const gap = Math.hypot(entity.x - node.x, entity.y - node.y);
+      const min = radius + ORE_COLLISION_RADIUS;
+      if (gap > 0 && gap < min) {
+        const push = min - gap;
+        entity.x += ((entity.x - node.x) / gap) * push;
+        entity.y += ((entity.y - node.y) / gap) * push;
+      } else if (gap === 0) {
+        entity.x += min;
+      }
+    }
+  }
+
   function resolveWallCollision(entity, radius, includeTrees = false) {
     for (const wall of solidWalls()) {
       const f = footprint("wall");
@@ -3808,6 +4171,7 @@
       }
     }
     if (includeTrees) resolveTreeCollision(entity, radius);
+    resolveOreCollision(entity, radius);
   }
 
   function hitsWall(p, radius) {
@@ -3873,8 +4237,8 @@
       const fits = x > rect.x + raftPadding && x < rect.x + TILE - raftPadding && y > rect.y + raftPadding && y < rect.y + TILE - raftPadding;
       return fits ? { kind: "crewRaft", ownerId: crewTile.ownerId, world: crewTile.world, tile: crewTile.tile } : null;
     }
-    const island = state.islands.find((item) => Math.hypot(x - item.x, y - item.y) <= item.r + 4 - radius * 0.15);
-    if (island) return { kind: "island", island };
+    const land = landAreaAt({ x, y }, 4 - radius * 0.15);
+    if (land) return { kind: "island", island: land.island };
     return null;
   }
 
@@ -4065,7 +4429,8 @@
     const nextBase = xpForLevel(p.level + 1);
     setMeter("xp", ((p.totalXp - currentBase) / (nextBase - currentBase)) * 100);
     for (const key of ["wood", "leaves", "scrap", "iron", "steel", "cloth", "rope", "glass", "rawFish", "cookedFish", "sharkMeat", "meat", "cookedMeat", "coconut", "tomato"]) {
-      document.querySelector(`[data-res="${key}"]`).textContent = `${cap(key)} ${state.resources[key] || 0}`;
+      const el = document.querySelector(`[data-res="${key}"]`);
+      if (el) el.textContent = `${label(key)} ${state.resources[key] || 0}`;
     }
     document.getElementById("level").textContent = p.level;
     document.getElementById("speed").textContent = p.speed;
@@ -4093,6 +4458,8 @@
     if (st) return `F: use ${label(st.type)}`;
     const remoteSt = nearestRemoteStructure(p, 56);
     if (remoteSt) return `F: use ${label(remoteSt.structure.type)}`;
+    const nearOre = activeOreNodes().find((node) => node.active && node.hp > 0 && dist(node, p) < 76);
+    if (nearOre) return `Select a pickaxe and click to mine ${label(nearOre.type).toLowerCase()}.`;
     const nearLoot = state.debris.some((d) => dist(d, p) < 84) || state.islands.some((is) => is.loot.some((l) => !l.dead && dist(l, p) < 46));
     if (nearLoot) return "F: pick up";
     if (!isOnRaft(p) && !isOnIsland(p)) {
@@ -4113,6 +4480,7 @@
     ctx.translate(w / 2 - state.camera.x, h / 2 - state.camera.y);
     drawOcean();
     drawIslands();
+    drawServerOreNodes();
     drawDebris();
     drawShark();
     drawRemoteRafts();
@@ -4120,6 +4488,7 @@
     drawStructures();
     drawCast();
     drawAnimals();
+    drawServerElephants();
     drawProjectiles();
     drawRemotePlayers();
     drawPlayer();
@@ -4274,6 +4643,29 @@
         roundRect(loot.x - 8, loot.y - 7, 16, 14, 4);
         ctx.fill();
       }
+    }
+  }
+
+  function drawServerOreNodes() {
+    for (const node of activeOreNodes()) {
+      if (!node.active || node.hp <= 0) continue;
+      ctx.save();
+      ctx.translate(node.x, node.y);
+      const isIron = node.type === "iron";
+      ctx.fillStyle = "#6f6258";
+      blob(0, 0, 22, 8, 0.12);
+      ctx.fill();
+      ctx.fillStyle = isIron ? "#c7d0d2" : "#c87543";
+      circle(-8, -5, isIron ? 4.8 : 5.5);
+      circle(8, 2, isIron ? 6.2 : 5.8);
+      circle(0, 9, isIron ? 4.5 : 4);
+      ctx.fillStyle = isIron ? "#eef5f6" : "#e29a68";
+      circle(7, -6, 3);
+      ctx.strokeStyle = isIron ? "#e7eef0" : "#e29a68";
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      ctx.restore();
+      if (node.hp < node.maxHp) healthBar(node.x, node.y - 30, node.hp / node.maxHp, 34);
     }
   }
 
@@ -4485,9 +4877,10 @@
   function drawRemoteRafts() {
     for (const [ownerId, world] of remoteWorlds) {
       ctx.save();
-      ctx.globalAlpha = 0.78;
       for (const rt of world.raft || []) {
-        drawRaftTile(remoteRaftTileRect(world, rt), rt, "#9d8051", "rgba(40,56,61,0.28)", 0.78);
+        const r = remoteRaftTileRect(world, rt);
+        drawRaftTile(r, rt, "#b97538", "rgba(89,49,25,0.32)", 1);
+        if (rt.hp < rt.maxHp) healthBar(r.x + TILE / 2, r.y - 8, rt.hp / rt.maxHp, 38);
       }
       for (const st of world.structures || []) drawRemoteStructure(st);
       ctx.restore();
@@ -4568,6 +4961,26 @@
       circle(0, 0, 8);
       if (st.hasGlass || st.ready) drawFlaskModel(15, -9, 0.38, st.ready);
       drawMachineProgress(st, 21);
+    } else if (st.type === "ironRefinery") {
+      ctx.fillStyle = "#4d5559";
+      roundRect(-20, -16, 40, 32, 6);
+      ctx.fill();
+      ctx.fillStyle = "#263238";
+      circle(-8, 0, 8);
+      ctx.fillStyle = st.ready ? "#f4d9a1" : st.timer > 0 ? "#f27a42" : "#10191d";
+      circle(-8, 0, st.ready ? 6 : 4 + Math.sin(waveTime * 7));
+      ctx.strokeStyle = "#c87843";
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(8, -11);
+      ctx.lineTo(8, 10);
+      ctx.moveTo(14, -8);
+      ctx.lineTo(14, 10);
+      ctx.stroke();
+      ctx.fillStyle = "#9c5c38";
+      roundRect(4, -20, 14, 9, 3);
+      ctx.fill();
+      drawMachineProgress(st, 23);
     } else if (st.type === "plantPot") {
       ctx.fillStyle = "#8f5634";
       roundRect(-15, -10, 30, 22, 5);
@@ -4656,7 +5069,7 @@
     ctx.fillStyle = "rgba(0, 0, 0, 0.42)";
     roundRect(-17, y, 34, 5, 3);
     ctx.fill();
-    ctx.fillStyle = st.type === "plantPot" ? "#72d572" : st.type === "waterMaker" ? "#75d7ff" : "#ffd36a";
+    ctx.fillStyle = st.type === "plantPot" ? "#72d572" : st.type === "waterMaker" ? "#75d7ff" : st.type === "ironRefinery" ? "#f29a55" : "#ffd36a";
     roundRect(-17, y, 34 * progress, 5, 3);
     ctx.fill();
   }
@@ -4766,8 +5179,72 @@
     }
   }
 
+  function drawServerElephants() {
+    for (const elephant of serverElephants) {
+      if (!elephant || elephant.hp <= 0) continue;
+      const charging = elephant.mode === "charge";
+      const stunned = elephant.mode === "stunned";
+      const trunkSwing = elephant.mode === "trunk" ? Math.sin(waveTime * 13) * 0.65 : 0;
+      ctx.save();
+      ctx.translate(elephant.x, elephant.y);
+      ctx.rotate(elephant.facing || 0);
+      ctx.fillStyle = elephant.hit > 0 ? "#fff2ed" : stunned ? "#aeb6b8" : "#858f92";
+      ellipse(-5, 0, 42, 25, 0);
+      ctx.fillStyle = "#737d80";
+      ellipse(31, 0, 19, 16, 0);
+      ctx.fillStyle = "#6d7779";
+      circle(25, -17, 12);
+      circle(25, 17, 12);
+      ctx.strokeStyle = "#727c7f";
+      ctx.lineWidth = 9;
+      ctx.beginPath();
+      ctx.moveTo(43, 0);
+      ctx.quadraticCurveTo(60, 4 + trunkSwing * 10, 62, 23 + trunkSwing * 22);
+      ctx.stroke();
+      ctx.strokeStyle = "#eee5c4";
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(39, -7);
+      ctx.lineTo(54, -13);
+      ctx.moveTo(39, 7);
+      ctx.lineTo(54, 13);
+      ctx.stroke();
+      ctx.strokeStyle = "#5c6669";
+      ctx.lineWidth = 8;
+      for (const x of [-24, 8]) {
+        ctx.beginPath();
+        ctx.moveTo(x, -18);
+        ctx.lineTo(x - (charging ? 9 : 2), -31);
+        ctx.moveTo(x, 18);
+        ctx.lineTo(x + (charging ? 9 : 2), 31);
+        ctx.stroke();
+      }
+      ctx.fillStyle = "#263033";
+      circle(42, -5, 2.5);
+      if (charging) {
+        ctx.strokeStyle = "rgba(255, 178, 92, 0.65)";
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.moveTo(-55, -14);
+        ctx.lineTo(-82, -14);
+        ctx.moveTo(-55, 0);
+        ctx.lineTo(-92, 0);
+        ctx.moveTo(-55, 14);
+        ctx.lineTo(-82, 14);
+        ctx.stroke();
+      }
+      if (stunned) {
+        ctx.fillStyle = "#ffd76b";
+        for (let i = 0; i < 3; i++) circle(Math.cos(waveTime * 3 + i * TAU / 3) * 24, -39 + Math.sin(waveTime * 3 + i * TAU / 3) * 7, 3);
+      }
+      ctx.restore();
+      healthBar(elephant.x, elephant.y - 42, elephant.hp / elephant.maxHp, 54);
+    }
+  }
+
   function drawShark() {
     for (const s of state.sharks) {
+      if (s.hp <= 0) continue;
       const surfaced = s.aggressive || s.aggro > 0 || s.hp < SHARK_HP;
       const a = surfaced ? angleTo(s, state.player) : s.wander;
       ctx.save();
@@ -4903,6 +5380,7 @@
     if (spec?.base === "spear") return drawHeldSpear(spec);
     if (spec?.base === "axe") return drawHeldAxe(spec);
     if (spec?.base === "hammer") return drawHeldHammer(spec);
+    if (spec?.base === "pickaxe") return drawHeldPickaxe(spec);
     if (item === "musket") return drawHeldMusket();
     if (item === "oar") {
       ctx.save();
@@ -4956,6 +5434,8 @@
       drawHeldAxe(heldSpec);
     } else if (heldSpec?.base === "hammer") {
       drawHeldHammer(heldSpec);
+    } else if (heldSpec?.base === "pickaxe") {
+      drawHeldPickaxe(heldSpec);
     } else if (item === "musket") {
       drawHeldMusket();
     } else if (item === "oar") {
@@ -4993,7 +5473,11 @@
       return { metal: specOrMetal, tierStep: specOrMetal ? 1 : 0, color: specOrMetal ? "#99a9af" : "#d4bd82" };
     }
     const spec = specOrMetal || TOOL_TIERS.wood;
-    return { metal: spec.tier !== "wood", tierStep: tierIndex(spec.tier || "wood"), color: spec.color || TOOL_TIERS.wood.color };
+    return {
+      metal: spec.tier !== "wood",
+      tierStep: tierIndex(spec.tier || "wood"),
+      color: spec.color || TOOL_TIERS.wood.color
+    };
   }
 
   function drawHeldSpear(specOrMetal = false) {
@@ -5062,6 +5546,49 @@
     ctx.restore();
   }
 
+  function drawHeldPickaxe(specOrMetal = false) {
+    const style = toolDrawStyle(specOrMetal);
+    const swing = swingCurve("pickaxe");
+    ctx.save();
+    ctx.translate(14, 3);
+    ctx.rotate(0.5 - swing * 1.35);
+    ctx.strokeStyle = "#7b5234";
+    ctx.lineWidth = 5.5;
+    ctx.beginPath();
+    ctx.moveTo(-5, 14);
+    ctx.lineTo(44, -11);
+    ctx.stroke();
+
+    ctx.save();
+    ctx.translate(42, -11);
+    ctx.rotate(-0.12);
+    ctx.strokeStyle = style.metal ? "#5f6c70" : "#8d613b";
+    ctx.lineWidth = 5;
+    ctx.beginPath();
+    ctx.moveTo(-20, 0);
+    ctx.lineTo(26, 0);
+    ctx.stroke();
+
+    ctx.fillStyle = style.metal ? style.color : "#b98445";
+    ctx.beginPath();
+    ctx.moveTo(-24, -3);
+    ctx.quadraticCurveTo(-32, 1, -28, 9);
+    ctx.lineTo(-15, 2);
+    ctx.closePath();
+    ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(20, -3);
+    ctx.quadraticCurveTo(35, 0, 43, 12);
+    ctx.lineTo(25, 5);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = "#5d3824";
+    roundRect(-6, -5, 11, 10, 3);
+    ctx.fill();
+    ctx.restore();
+    ctx.restore();
+  }
+
   function drawHeldMusket() {
     ctx.save();
     ctx.translate(18, 0);
@@ -5098,9 +5625,11 @@
       const spec = toolSpec(buildChoice);
       if (buildChoice === "bandage") return drawHeldResourceItem("bandage");
       if (buildChoice === "flask") return drawHeldResourceItem("flask");
+      if (RESOURCE_CRAFT_OUTPUTS[buildChoice]) return drawHeldResourceItem(buildChoice);
       if (spec?.base === "spear") return drawHeldSpear(spec);
       if (spec?.base === "axe") return drawHeldAxe(spec);
       if (spec?.base === "hammer") return drawHeldHammer(spec);
+      if (spec?.base === "pickaxe") return drawHeldPickaxe(spec);
       if (buildChoice === "musket") return drawHeldMusket();
     }
     ctx.save();
@@ -5108,7 +5637,7 @@
     ctx.rotate(buildAngle);
     ctx.globalAlpha = 0.92;
     const f = footprint(buildChoice);
-    ctx.fillStyle = buildChoice === "raft" ? "#b97538" : buildChoice === "waterMaker" ? "#6fb9cb" : buildChoice === "plantPot" ? "#8f5634" : buildChoice === "wall" ? "#9c642f" : buildChoice === "torch" ? "#ffb238" : buildChoice === "cannon" ? "#4d525b" : "#8e552e";
+    ctx.fillStyle = buildChoice === "raft" ? "#b97538" : buildChoice === "waterMaker" ? "#6fb9cb" : buildChoice === "ironRefinery" ? "#4d5559" : buildChoice === "plantPot" ? "#8f5634" : buildChoice === "wall" ? "#9c642f" : buildChoice === "torch" ? "#ffb238" : buildChoice === "cannon" ? "#4d525b" : "#8e552e";
     if (buildChoice === "raft") {
       roundRect(-18, -14, 36, 28, 5);
       ctx.fill();
@@ -5241,6 +5770,11 @@
       mctx.arc(island.x * scale, island.y * scale, island.r * scale, 0, TAU);
       mctx.fill();
     }
+    for (const elephant of serverElephants) {
+      if (elephant.hp <= 0) continue;
+      mctx.fillStyle = elephant.targetId ? "#ff9f68" : "#aeb8b8";
+      mctx.fillRect(elephant.x * scale - 2, elephant.y * scale - 2, 4, 4);
+    }
     mctx.fillStyle = "#d79045";
     for (const rt of state.raft) {
       const r = raftTileRect(rt);
@@ -5254,10 +5788,27 @@
       }
     }
     for (const shark of state.sharks) {
+      if (shark.hp <= 0) continue;
       mctx.fillStyle = shark.aggressive || shark.aggro > 0 ? "#ff6576" : "#2f454f";
       mctx.beginPath();
       mctx.arc(shark.x * scale, shark.y * scale, 2.2, 0, TAU);
       mctx.fill();
+    }
+    for (const player of remotePlayers) {
+      if (!player || player.health <= 0) continue;
+      const x = player.x * scale;
+      const y = player.y * scale;
+      mctx.fillStyle = isCrewMate(player) ? "#67ef9a" : "#ffc75b";
+      mctx.strokeStyle = "rgba(8, 25, 32, 0.8)";
+      mctx.lineWidth = 1.2;
+      mctx.beginPath();
+      mctx.arc(x, y, 3, 0, TAU);
+      mctx.fill();
+      mctx.stroke();
+      mctx.beginPath();
+      mctx.moveTo(x, y);
+      mctx.lineTo(x + Math.cos(player.facing || 0) * 5, y + Math.sin(player.facing || 0) * 5);
+      mctx.stroke();
     }
     mctx.fillStyle = "#ffffff";
     mctx.beginPath();
@@ -5322,11 +5873,13 @@
       raft: "Raft Tile",
       grill: "Grill",
       waterMaker: "Water Maker",
+      ironRefinery: "Iron Refinery",
       plantPot: "Plant Pot",
       chest: "Chest",
       wall: "Wall",
       torch: "Torch",
       cannon: "Cannon",
+      iron: "Iron Ore",
       flask: "Empty Water Flask",
       waterFlask: "Filled Water Flask",
       musket: "Musket",

@@ -13,25 +13,31 @@ const ACTIVE_PLAYER_TIMEOUT_MS = 45_000;
 const TOMBSTONE_MS = 30_000;
 const MAX_BODY_BYTES = 1_500_000;
 const SERVER_SHARK_COUNT = 2;
-const SERVER_SHARK_SPEED = 110;
+const SERVER_SHARK_HP = 120;
+const SERVER_SHARK_SPEED = 76;
 const SERVER_SHARK_DAMAGE = 36;
+const SERVER_SHARK_RESPAWN_MS = 8_000;
+const SERVER_SHARK_DETECTION_RANGE = 720;
+const ELEPHANT_HP = SERVER_SHARK_HP * 2;
+const ELEPHANT_SPEED = 18;
+const IRON_RESPAWN_MS = 7 * 60_000;
 
 const ISLANDS = [
   { x: 1200, y: 1100, r: 215 },
   { x: 3000, y: 950, r: 260 },
   { x: 5200, y: 1200, r: 285 },
-  { x: 8200, y: 1050, r: 330 },
+  { x: 8200, y: 1050, r: 330, elephants: true },
   { x: 1500, y: 3000, r: 300 },
-  { x: 4000, y: 3300, r: 430 },
+  { x: 4000, y: 3300, r: 430, elephants: true },
   { x: 6500, y: 3100, r: 245 },
   { x: 8700, y: 3500, r: 275 },
   { x: 1150, y: 5500, r: 260 },
   { x: 3300, y: 5900, r: 225 },
-  { x: 6000, y: 5600, r: 380 },
+  { x: 6000, y: 5600, r: 380, elephants: true },
   { x: 8500, y: 5900, r: 230 },
   { x: 1700, y: 8250, r: 315 },
   { x: 4700, y: 8100, r: 260 },
-  { x: 7800, y: 8350, r: 390 }
+  { x: 7800, y: 8350, r: 390, elephants: true }
 ];
 
 const SPAWN_POINTS = [
@@ -62,6 +68,7 @@ const mime = {
 const players = new Map();
 let lastTick = Date.now();
 let nextProjectileId = 1;
+let nextOreNodeId = 1;
 let projectiles = [];
 
 const sharks = Array.from({ length: SERVER_SHARK_COUNT }, (_, index) => ({
@@ -70,8 +77,61 @@ const sharks = Array.from({ length: SERVER_SHARK_COUNT }, (_, index) => ({
   y: 800 + Math.random() * (WORLD - 1600),
   facing: Math.random() * Math.PI * 2,
   targetId: null,
-  biteAt: 0
+  biteAt: 0,
+  hp: SERVER_SHARK_HP,
+  maxHp: SERVER_SHARK_HP,
+  respawnAt: 0
 }));
+
+const oreNodes = [];
+function addOreNode(island, islandIndex, type, angle, radius) {
+  const maxHp = 92;
+  oreNodes.push({
+    id: `ore-${nextOreNodeId++}`,
+    type,
+    islandIndex,
+    x: island.x + Math.cos(angle) * radius,
+    y: island.y + Math.sin(angle) * radius,
+    hp: maxHp,
+    maxHp,
+    active: true,
+    respawnAt: 0
+  });
+}
+
+for (let islandIndex = 0; islandIndex < ISLANDS.length; islandIndex++) {
+  const island = ISLANDS[islandIndex];
+  const ironCount = island.r >= 350 ? 3 : island.r >= 285 ? 2 : 1;
+  for (let i = 0; i < ironCount; i++) {
+    const angle = islandIndex * 1.37 + i * (Math.PI * 2 / ironCount) + 0.7;
+    addOreNode(island, islandIndex, "iron", angle, island.r * (0.34 + i * 0.08));
+  }
+}
+
+const elephants = ISLANDS.flatMap((island, islandIndex) => {
+  if (!island.elephants) return [];
+  const count = island.r >= 380 ? 2 : 1;
+  return Array.from({ length: count }, (_, index) => {
+    const angle = islandIndex * 1.11 + index * Math.PI;
+    return {
+      id: `elephant-${islandIndex}-${index}`,
+      islandIndex,
+      x: island.x + Math.cos(angle) * island.r * 0.35,
+      y: island.y + Math.sin(angle) * island.r * 0.35,
+      facing: angle + Math.PI / 2,
+      hp: ELEPHANT_HP,
+      maxHp: ELEPHANT_HP,
+      targetId: null,
+      mode: "wander",
+      modeUntil: 0,
+      stunnedUntil: 0,
+      attackAt: 0,
+      nextChargeAt: Date.now() + 5000 + Math.random() * 4000,
+      wanderAt: 0,
+      respawnAt: 0
+    };
+  });
+});
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
@@ -84,6 +144,21 @@ function number(value, fallback = 0) {
 
 function distance(a, b) {
   return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
+function grantResource(player, type, qty, message) {
+  if (!player || qty <= 0) return;
+  const id = player.nextGrantId || 1;
+  player.nextGrantId = id + 1;
+  if (!Array.isArray(player.grants)) player.grants = [];
+  player.grants.push({ id, type, qty, message });
+  if (player.grants.length > 40) player.grants = player.grants.slice(-40);
+}
+
+function acknowledgeGrants(player, grantAck) {
+  if (!player?.grants?.length) return;
+  const ack = Math.max(0, Math.floor(number(grantAck)));
+  if (ack > 0) player.grants = player.grants.filter((grant) => grant.id > ack);
 }
 
 function cleanId(value) {
@@ -148,25 +223,27 @@ function sanitizeWorld(world) {
     hp: clamp(number(tile?.hp, 120), 0, 600),
     maxHp: clamp(number(tile?.maxHp, 120), 1, 600)
   }));
-  const structures = (Array.isArray(world.structures) ? world.structures : []).slice(0, 320).map((item) => ({
-    id: String(item?.id || "").slice(0, 50),
-    type: String(item?.type || "chest").slice(0, 24),
-    x: clamp(number(item?.x), 0, WORLD),
-    y: clamp(number(item?.y), 0, WORLD),
-    angle: number(item?.angle),
-    base: item?.base === "island" ? "island" : "raft",
-    hp: clamp(number(item?.hp, 80), 0, 800),
-    maxHp: clamp(number(item?.maxHp, 80), 1, 800),
-    timer: clamp(number(item?.timer), 0, 1200),
-    maxTimer: clamp(number(item?.maxTimer), 0, 1200),
-    ready: Boolean(item?.ready),
-    hasGlass: Boolean(item?.hasGlass),
-    planted: Boolean(item?.planted),
-    cooking: item?.cooking ? String(item.cooking).slice(0, 32) : null,
-    aimOffset: clamp(number(item?.aimOffset), -Math.PI / 2, Math.PI / 2),
-    cooldown: clamp(number(item?.cooldown), 0, 20),
-    storage: item?.type === "chest" ? cleanSlots(item.storage, 40) : null
-  }));
+  const structures = (Array.isArray(world.structures) ? world.structures : [])
+    .slice(0, 320)
+    .map((item) => ({
+      id: String(item?.id || "").slice(0, 50),
+      type: String(item?.type || "chest").slice(0, 24),
+      x: clamp(number(item?.x), 0, WORLD),
+      y: clamp(number(item?.y), 0, WORLD),
+      angle: number(item?.angle),
+      base: item?.base === "island" ? "island" : "raft",
+      hp: clamp(number(item?.hp, 80), 0, 800),
+      maxHp: clamp(number(item?.maxHp, 80), 1, 800),
+      timer: clamp(number(item?.timer), 0, 1200),
+      maxTimer: clamp(number(item?.maxTimer), 0, 1200),
+      ready: Boolean(item?.ready),
+      hasGlass: Boolean(item?.hasGlass),
+      planted: Boolean(item?.planted),
+      cooking: item?.cooking ? String(item.cooking).slice(0, 32) : null,
+      aimOffset: clamp(number(item?.aimOffset), -Math.PI / 2, Math.PI / 2),
+      cooldown: clamp(number(item?.cooldown), 0, 20),
+      storage: item?.type === "chest" ? cleanSlots(item.storage, 40) : null
+    }));
   return {
     version: Math.max(0, Math.floor(number(world.version))),
     raftOffset: {
@@ -344,6 +421,8 @@ function playerFromBody(id, body, existing = null) {
     crewId: existing?.crewId || id,
     teleportAt: existing?.teleportAt || 0,
     damagedAt: existing?.damagedAt || 0,
+    grants: existing?.grants || [],
+    nextGrantId: existing?.nextGrantId || 1,
     seen: Date.now(),
     world,
     destroyedStructures: cleanTombstones(existing?.destroyedStructures),
@@ -473,7 +552,6 @@ function applyWorldCommands(actorId, commands) {
       tile.hp = clamp(tile.hp - clamp(number(command.damage), 0, 240), 0, tile.maxHp);
       if (tile.hp <= 0) removeRaftTile(owner, tile);
     } else if (command.type === "patchStructure") {
-      if (!sameCrew(actor, owner)) continue;
       const structure = owner.world.structures.find((item) => item.id === String(command.structureId || ""));
       const patch = command.patch;
       if (!structure || !patch || typeof patch !== "object") continue;
@@ -524,6 +602,64 @@ function applyPlayerHits(attackerId, hits) {
     if (sameCrew(attacker, target) && hit.friendlyFire === false) continue;
     target.health = clamp(target.health - clamp(number(hit.damage), 0, 120), 0, 100);
     target.damagedAt = Date.now();
+  }
+}
+
+function applySharkHits(attackerId, hits) {
+  if (!players.has(attackerId)) return;
+  for (const hit of Array.isArray(hits) ? hits.slice(0, 24) : []) {
+    const shark = sharks.find((item) => item.id === String(hit?.sharkId || ""));
+    if (!shark || shark.hp <= 0) continue;
+    shark.hp = clamp(shark.hp - clamp(number(hit.damage), 0, 120), 0, shark.maxHp);
+    if (shark.hp <= 0) {
+      shark.hp = 0;
+      shark.targetId = null;
+      shark.respawnAt = Date.now() + SERVER_SHARK_RESPAWN_MS;
+    }
+  }
+}
+
+function selectedTool(player) {
+  const match = /^(wood|scrap|iron|steel)(Axe|Spear|Hammer|Pickaxe)$/.exec(player?.selectedItem || "");
+  if (!match) return null;
+  return {
+    tier: match[1],
+    base: match[2].charAt(0).toLowerCase() + match[2].slice(1)
+  };
+}
+
+function applyOreHits(attackerId, hits) {
+  const attacker = players.get(attackerId);
+  const tool = selectedTool(attacker);
+  if (!attacker || tool?.base !== "pickaxe") return;
+  for (const hit of Array.isArray(hits) ? hits.slice(0, 24) : []) {
+    const node = oreNodes.find((item) => item.id === String(hit?.nodeId || ""));
+    if (!node?.active || node.hp <= 0 || distance(attacker, node) > 115) continue;
+    const tierDamage = { wood: 18, scrap: 23, iron: 29, steel: 36 }[tool.tier] || 18;
+    node.hp = clamp(node.hp - Math.min(tierDamage, clamp(number(hit.damage), 1, 80)), 0, node.maxHp);
+    if (node.hp > 0) continue;
+    node.active = false;
+    const qty = 2;
+    node.respawnAt = Date.now() + IRON_RESPAWN_MS;
+    grantResource(attacker, "iron", qty, `Mined ${qty} iron ore.`);
+  }
+}
+
+function applyElephantHits(attackerId, hits) {
+  const attacker = players.get(attackerId);
+  if (!attacker) return;
+  for (const hit of Array.isArray(hits) ? hits.slice(0, 24) : []) {
+    const elephant = elephants.find((item) => item.id === String(hit?.elephantId || ""));
+    if (!elephant || elephant.hp <= 0 || distance(attacker, elephant) > 760) continue;
+    elephant.hp = clamp(elephant.hp - clamp(number(hit.damage), 1, 160), 0, elephant.maxHp);
+    elephant.targetId = attacker.id;
+    elephant.nextChargeAt = Math.min(elephant.nextChargeAt, Date.now() + 1800);
+    if (elephant.hp > 0) continue;
+    elephant.hp = 0;
+    elephant.targetId = null;
+    elephant.mode = "dead";
+    elephant.respawnAt = Date.now() + 180_000;
+    grantResource(attacker, "meat", 6, "Elephant defeated. 6 raw meat collected.");
   }
 }
 
@@ -590,6 +726,123 @@ function steerAroundIslands(entity, desired) {
   return angle;
 }
 
+function islandIndexAt(entity) {
+  return ISLANDS.findIndex((island) => distance(entity, island) <= island.r + 8);
+}
+
+function moveElephantWithinIsland(elephant, speed, dt) {
+  const island = ISLANDS[elephant.islandIndex];
+  elephant.x += Math.cos(elephant.facing) * speed * dt;
+  elephant.y += Math.sin(elephant.facing) * speed * dt;
+  const gap = distance(elephant, island);
+  const limit = island.r * 0.82;
+  if (gap > limit) {
+    elephant.facing = Math.atan2(island.y - elephant.y, island.x - elephant.x);
+    elephant.x = island.x + ((elephant.x - island.x) / gap) * limit;
+    elephant.y = island.y + ((elephant.y - island.y) / gap) * limit;
+  }
+}
+
+function hitPlayerWithKnockback(player, elephant, damage, force) {
+  player.health = clamp(player.health - damage, 0, 100);
+  const angle = Math.atan2(player.y - elephant.y, player.x - elephant.x);
+  player.x = clamp(player.x + Math.cos(angle) * force, 80, WORLD - 80);
+  player.y = clamp(player.y + Math.sin(angle) * force, 80, WORLD - 80);
+  player.teleportAt = Date.now();
+  player.damagedAt = Date.now();
+}
+
+function chargeWallCollision(elephant) {
+  for (const owner of activePlayerRecords()) {
+    if (!owner.world) continue;
+    for (const wall of owner.world.structures) {
+      if (wall.type !== "wall" || wall.hp <= 0 || distance(elephant, wall) > 58) continue;
+      wall.hp = clamp(wall.hp - 95, 0, wall.maxHp);
+      if (wall.hp <= 0) removeStructure(owner, wall);
+      elephant.mode = "stunned";
+      elephant.stunnedUntil = Date.now() + 2000;
+      elephant.modeUntil = elephant.stunnedUntil;
+      elephant.nextChargeAt = Date.now() + 6500;
+      return true;
+    }
+  }
+  return false;
+}
+
+function tickElephants(now, dt) {
+  for (const elephant of elephants) {
+    const island = ISLANDS[elephant.islandIndex];
+    if (elephant.hp <= 0) {
+      if (now >= elephant.respawnAt) {
+        elephant.hp = elephant.maxHp;
+        elephant.x = island.x + (Math.random() - 0.5) * island.r * 0.5;
+        elephant.y = island.y + (Math.random() - 0.5) * island.r * 0.5;
+        elephant.facing = Math.random() * Math.PI * 2;
+        elephant.mode = "wander";
+        elephant.targetId = null;
+        elephant.nextChargeAt = now + 6000;
+      }
+      continue;
+    }
+    if (now < elephant.stunnedUntil) {
+      elephant.mode = "stunned";
+      continue;
+    }
+    let target = elephant.targetId ? players.get(elephant.targetId) : null;
+    if (!target || target.health <= 0 || islandIndexAt(target) !== elephant.islandIndex || distance(elephant, target) > 720) {
+      elephant.targetId = null;
+      target = null;
+    }
+    if (!target) {
+      elephant.mode = "wander";
+      if (now >= elephant.wanderAt) {
+        elephant.wanderAt = now + 2500 + Math.random() * 3500;
+        elephant.facing += (Math.random() - 0.5) * 1.6;
+      }
+      moveElephantWithinIsland(elephant, ELEPHANT_SPEED * 0.45, dt);
+      continue;
+    }
+
+    const gap = distance(elephant, target);
+    if (elephant.mode === "charge" && now < elephant.modeUntil) {
+      moveElephantWithinIsland(elephant, ELEPHANT_SPEED * 4.5, dt);
+      if (chargeWallCollision(elephant)) continue;
+      if (distance(elephant, target) < 42) {
+        hitPlayerWithKnockback(target, elephant, 46, 105);
+        elephant.mode = "chase";
+        elephant.modeUntil = 0;
+        elephant.nextChargeAt = now + 7000;
+      }
+      continue;
+    }
+    if (elephant.mode === "trunk" && now < elephant.modeUntil) continue;
+    if (now >= elephant.nextChargeAt && gap > 85 && gap < 360) {
+      elephant.mode = "charge";
+      elephant.modeUntil = now + 1400;
+      elephant.facing = Math.atan2(target.y - elephant.y, target.x - elephant.x);
+      continue;
+    }
+    elephant.mode = "chase";
+    elephant.facing += shortAngle(Math.atan2(target.y - elephant.y, target.x - elephant.x) - elephant.facing) * Math.min(1, dt * 3.5);
+    if (gap > 48) moveElephantWithinIsland(elephant, ELEPHANT_SPEED, dt);
+    if (gap <= 54 && now >= elephant.attackAt) {
+      elephant.mode = "trunk";
+      elephant.modeUntil = now + 450;
+      elephant.attackAt = now + 1700;
+      hitPlayerWithKnockback(target, elephant, 24, 72);
+    }
+  }
+}
+
+function tickOreNodes(now) {
+  for (const node of oreNodes) {
+    if (node.active || !node.respawnAt || now < node.respawnAt) continue;
+    node.active = true;
+    node.hp = node.maxHp;
+    node.respawnAt = 0;
+  }
+}
+
 function tickWorld() {
   const now = Date.now();
   const dt = clamp((now - lastTick) / 1000, 0.016, 0.5);
@@ -610,11 +863,23 @@ function tickWorld() {
     (player) => player.health > 0 && !player.onIsland && (!player.spawnedAt || now - player.spawnedAt > 5000)
   );
   for (const shark of sharks) {
+    if (shark.hp <= 0) {
+      shark.targetId = null;
+      if (now >= shark.respawnAt) {
+        shark.x = 500 + Math.random() * (WORLD - 1000);
+        shark.y = 500 + Math.random() * (WORLD - 1000);
+        shark.facing = Math.random() * Math.PI * 2;
+        shark.hp = shark.maxHp;
+        shark.biteAt = now + 2500;
+        shark.respawnAt = 0;
+      }
+      continue;
+    }
     let target = null;
     let best = Infinity;
     for (const player of targets) {
       const gap = distance(shark, player);
-      if (gap < best) {
+      if (gap <= SERVER_SHARK_DETECTION_RANGE && gap < best) {
         best = gap;
         target = player;
       }
@@ -635,10 +900,13 @@ function tickWorld() {
       shark.targetId = null;
       if (Math.random() < dt * 0.3) shark.facing += (Math.random() - 0.5) * 0.35;
       shark.facing = steerAroundIslands(shark, shark.facing);
-      shark.x = clamp(shark.x + Math.cos(shark.facing) * 34 * dt, 80, WORLD - 80);
-      shark.y = clamp(shark.y + Math.sin(shark.facing) * 34 * dt, 80, WORLD - 80);
+      shark.x = clamp(shark.x + Math.cos(shark.facing) * 26 * dt, 80, WORLD - 80);
+      shark.y = clamp(shark.y + Math.sin(shark.facing) * 26 * dt, 80, WORLD - 80);
     }
   }
+
+  tickElephants(now, dt);
+  tickOreNodes(now);
 
   for (const projectile of projectiles) {
     projectile.life -= dt;
@@ -651,12 +919,43 @@ function tickWorld() {
 }
 
 function snapshot(id) {
+  const viewer = players.get(id);
   return {
     id,
     scoreboard: scoreboard(),
     players: publicPlayers(),
     worlds: publicWorlds(id),
-    serverSharks: sharks.map(({ id: sharkId, x, y, facing, targetId }) => ({ id: sharkId, x, y, facing, targetId })),
+    serverSharks: sharks.map(({ id: sharkId, x, y, facing, targetId, hp, maxHp }) => ({
+      id: sharkId,
+      x,
+      y,
+      facing,
+      targetId,
+      hp,
+      maxHp
+    })),
+    serverElephants: elephants.map(({ id: elephantId, x, y, facing, hp, maxHp, targetId, mode, islandIndex }) => ({
+      id: elephantId,
+      x,
+      y,
+      facing,
+      hp,
+      maxHp,
+      targetId,
+      mode,
+      islandIndex
+    })),
+    serverOreNodes: oreNodes.map(({ id: nodeId, type, x, y, hp, maxHp, active, islandIndex }) => ({
+      id: nodeId,
+      type,
+      x,
+      y,
+      hp,
+      maxHp,
+      active,
+      islandIndex
+    })),
+    grants: viewer?.grants || [],
     serverProjectiles: projectiles.map(({ id: projectileId, type, x, y, vx, vy, life, damage, radius }) => ({
       id: projectileId,
       type,
@@ -717,6 +1016,7 @@ async function handleRequest(req, res) {
     const body = await readBody(req);
     const id = cleanId(body.id || body.clientId);
     const existing = players.get(id) || null;
+    acknowledgeGrants(existing, body.grantAck);
     const player = playerFromBody(id, body, existing);
     if (!existing && player.world) {
       const preferred = raftCenter(player.world);
@@ -728,6 +1028,9 @@ async function handleRequest(req, res) {
     applyWorldCommands(id, body.worldCommands);
     applyProjectileCommands(body.projectileCommands);
     applyPlayerHits(id, body.playerHits);
+    applySharkHits(id, body.sharkHits);
+    applyElephantHits(id, body.elephantHits);
+    applyOreHits(id, body.oreHits);
     tickWorld();
     sendJson(res, snapshot(id));
     return;
@@ -773,6 +1076,9 @@ if (require.main === module) {
 
 module.exports = {
   players,
+  sharks,
+  elephants,
+  oreNodes,
   sanitizeWorld,
   playerFromBody,
   raftCenter,
@@ -781,5 +1087,10 @@ module.exports = {
   scoreboard,
   joinCrew,
   applyPlayerHits,
-  applyWorldCommands
+  applySharkHits,
+  applyElephantHits,
+  applyOreHits,
+  applyWorldCommands,
+  tickWorld,
+  snapshot
 };
